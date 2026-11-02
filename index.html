@@ -1,0 +1,928 @@
+<title>Inside AlphaZero</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="An interactive 3D explorer and illustrated guide to the AlphaZero chess network.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: two views. Explorer = full-height 3D stage + docked panel (bottom sheet on phones). Guide = long-scroll infographic, one numbered section per stage of the pipeline. */
+:root{
+  --bg:#eef1f4; --surface:#ffffff; --fg:#17212b; --muted:#5b6977; --grid:#b9c3cd;
+  --accent:#0d7a84; --white:#b97a12; --black:#4b4fcc; --const:#6f8a3a;
+  --sqLight:#e6eaee; --sqDark:#9fb0bf; --pieceW:#fbfbf7; --pieceB:#1b2430;
+  --f-display:"Familjen Grotesk","Helvetica Neue",Arial,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0e1319; --surface:#161d25; --fg:#e2e8ee; --muted:#93a1ae; --grid:#3a4653;
+  --accent:#3fc4cd; --white:#e7b04c; --black:#9396ff; --const:#a6c46a;
+  --sqLight:#3c4a58; --sqDark:#26313c; --pieceW:#f6f4ec; --pieceB:#0b0f14; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0e1319; --surface:#161d25; --fg:#e2e8ee; --muted:#93a1ae; --grid:#3a4653;
+  --accent:#3fc4cd; --white:#e7b04c; --black:#9396ff; --const:#a6c46a;
+  --sqLight:#3c4a58; --sqDark:#26313c; --pieceW:#f6f4ec; --pieceB:#0b0f14; color-scheme:dark}
+
+html,body{height:100%}
+[hidden]{display:none!important}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:14px;line-height:1.5}
+button{font-family:inherit}
+button:focus-visible,input:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------- Explorer ---------- */
+.app{height:100%;display:grid;grid-template-columns:minmax(0,1fr) 390px}
+.stage{position:relative;min-width:0;min-height:0;overflow:hidden}
+#gl{display:block;width:100%;height:100%;touch-action:none;cursor:grab}
+#gl:active{cursor:grabbing}
+.hint{position:absolute;left:max(16px,env(safe-area-inset-left,0px));bottom:12px;font:12px var(--f-mono);color:var(--muted);pointer-events:none}
+.glerr{position:absolute;inset:0;display:grid;place-items:center;padding:24px;text-align:center;color:var(--muted)}
+.signal{position:absolute;top:12px;left:max(16px,env(safe-area-inset-left,0px));right:16px;display:flex;flex-wrap:wrap;gap:6px;pointer-events:none}
+.signal span{font:500 11px var(--f-mono);letter-spacing:.06em;text-transform:uppercase;padding:4px 9px;border-radius:999px;background:var(--surface);color:var(--muted);border:1px solid var(--grid);transition:background .15s,color .15s,transform .15s}
+.signal span.on{background:var(--accent);border-color:var(--accent);color:var(--surface);transform:translateY(-2px) scale(1.06)}
+.signal span.done{color:var(--fg);border-color:var(--accent)}
+.panel{background:var(--surface);border-left:1px solid var(--grid);overflow-y:auto;min-width:0;
+  padding-block:18px 28px;padding-left:max(20px,env(safe-area-inset-left,0px));padding-right:max(20px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:16px}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.eyebrow{margin:0;font:500 11px var(--f-mono);letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+h1{margin:2px 0 0;font:700 30px/1.05 var(--f-display);letter-spacing:-.01em;text-wrap:balance}
+h2{margin:0;font:700 19px/1.2 var(--f-display);text-wrap:balance}
+.viewlink{flex:none;font:500 12.5px var(--f-body);color:var(--accent);text-decoration:none;border:1px solid var(--accent);border-radius:999px;padding:6px 12px;margin-top:4px}
+.viewlink:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.tabs{display:flex;flex-wrap:wrap;gap:6px}
+.tabs button{font:500 12.5px var(--f-body);padding:6px 10px;border-radius:999px;border:1px solid var(--grid);background:transparent;color:var(--fg);cursor:pointer}
+.tabs button[aria-selected="true"]{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+.ctl{display:flex;flex-direction:column;gap:6px}
+.ctl label{display:flex;justify-content:space-between;gap:12px;font:500 11px var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.ctl label b{font-weight:500;color:var(--fg);letter-spacing:0;text-transform:none;font-size:12.5px;text-align:right}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.sec{display:flex;flex-direction:column;gap:14px}
+.sec p{margin:0;max-width:65ch}
+.sec p.note{color:var(--muted);font-size:12.5px}
+.readout{font:12.5px/1.6 var(--f-mono);background:var(--bg);border-radius:8px;padding:10px 12px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.readout .k{color:var(--muted)}
+.readout .hit{color:var(--accent);font-weight:500}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.btn{font:500 12.5px var(--f-body);padding:7px 12px;border-radius:6px;border:1px solid var(--grid);background:var(--surface);color:var(--fg);cursor:pointer}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--surface);min-width:84px}
+.btn[aria-pressed="true"]{border-color:var(--accent);color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.btn:disabled{opacity:.45;cursor:default}
+.check{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--fg)}
+.check input{accent-color:var(--accent)}
+.status{font:700 22px/1.15 var(--f-display)}
+#pboard{width:100%;max-width:340px;aspect-ratio:1;border-radius:6px;cursor:pointer;touch-action:manipulation;box-shadow:0 0 0 1px var(--grid)}
+.status small{display:block;font:500 12.5px var(--f-body);color:var(--muted);margin-top:4px}
+.kernels{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
+.kern{display:flex;flex-direction:column;gap:4px;font:11px var(--f-mono);color:var(--muted)}
+.kern .g{display:grid;grid-template-columns:repeat(3,28px);gap:2px}
+.kern .g span{height:28px;display:grid;place-items:center;background:var(--bg);color:var(--muted);font:12px var(--f-mono);border-radius:3px}
+.kern .g span.on{background:var(--accent);color:var(--surface)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font:12px var(--f-mono);color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+#mini{width:160px;height:160px;border-radius:6px;image-rendering:pixelated;align-self:flex-start}
+.mini-wrap{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+.mini-wrap .readout{flex:1;min-width:150px}
+.movelist{display:flex;flex-wrap:wrap;gap:4px;max-height:132px;overflow-y:auto}
+.movelist button{font:12px var(--f-mono);padding:3px 7px;border-radius:4px;border:1px solid var(--grid);background:var(--surface);color:var(--fg);cursor:pointer}
+.movelist button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+.movelist button.next{border-color:var(--white);box-shadow:inset 0 -2px 0 var(--white)}
+.meter{height:10px;border-radius:999px;background:linear-gradient(90deg,var(--black),var(--grid) 50%,var(--accent));position:relative}
+.meter i{position:absolute;top:-4px;width:4px;height:18px;border-radius:2px;background:var(--fg);transform:translateX(-2px);transition:left .4s cubic-bezier(.34,1.56,.64,1)}
+.meter-l{display:flex;justify-content:space-between;font:11px var(--f-mono);color:var(--muted)}
+
+/* ---------- Guide ---------- */
+.guide{min-height:100%;padding-block:28px 56px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.guide .wrap{max-width:1040px;margin:0 auto;display:flex;flex-direction:column;gap:22px}
+.ghead{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;padding-bottom:8px}
+.ghead h1{font-size:clamp(34px,6vw,56px)}
+.ghead p{margin:8px 0 0;max-width:60ch;color:var(--muted);font-size:15px}
+.gs{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:24px;align-items:center;background:var(--surface);border:1px solid var(--grid);border-radius:14px;padding:22px}
+.gs.wide{grid-template-columns:1fr}
+.gs .txt{min-width:0;display:flex;flex-direction:column;gap:10px}
+.gs .num{font:500 12px var(--f-mono);letter-spacing:.1em;color:var(--accent);text-transform:uppercase}
+.gs h2{font-size:24px}
+.gs p{margin:0;max-width:62ch}
+.gs .rule{margin:4px 0 0;padding:10px 12px;border-left:3px solid var(--accent);background:var(--bg);border-radius:0 8px 8px 0;font-size:13.5px}
+.gs .rule b{font-weight:600}
+.fig{min-width:0;overflow-x:auto}
+.fig svg{display:block;width:100%;height:auto;min-width:480px}
+.gs.wide .fig svg{max-width:760px;margin:0 auto}
+.fig svg text{font-family:var(--f-mono);font-size:12px;fill:var(--fg)}
+.fig svg .h{font-family:var(--f-display);font-weight:700;font-size:15px}
+.fig svg .mu{fill:var(--muted)} .fig svg .sm{font-size:10.5px}
+.fig svg .on-ac{fill:var(--surface)}
+.f-ac{fill:var(--accent)} .f-w{fill:var(--white)} .f-b{fill:var(--black)} .f-c{fill:var(--const)} .f-bg{fill:var(--bg)} .f-sf{fill:var(--surface)} .f-gr{fill:var(--grid)} .f-fg{fill:var(--fg)} .f-mu{fill:var(--muted)} .f-none{fill:none}
+.s-fg{stroke:var(--fg)} .s-gr{stroke:var(--grid)} .s-ac{stroke:var(--accent)} .s-mu{stroke:var(--muted)} .s-sf{stroke:var(--surface)}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.stats div{background:var(--bg);border-radius:10px;padding:12px}
+.stats b{display:block;font:700 26px/1.1 var(--f-display);font-variant-numeric:tabular-nums}
+.stats span{font-size:12.5px;color:var(--muted)}
+.gfoot{color:var(--muted);font-size:12.5px;max-width:80ch}
+.gfoot a{color:var(--accent)}
+@media (max-width:860px){.gs{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:760px){
+  .app{grid-template-columns:1fr;grid-template-rows:minmax(0,46%) minmax(0,54%)}
+  .panel{border-left:0;border-top:1px solid var(--grid);padding-block:14px 24px}
+  h1{font-size:24px}
+  .signal span{font-size:10px;padding:3px 7px}
+}
+@media (prefers-reduced-motion:reduce){.signal span,.meter i{transition:none}}
+</style>
+
+<div class="app" id="explorer">
+  <div class="stage" id="stage">
+    <canvas id="gl" aria-label="3D view of the AlphaZero network"></canvas>
+    <div class="signal" id="signal" aria-hidden="true">
+      <span data-k="board">Board</span><span data-k="input">Input</span><span data-k="filter">Filters</span><span data-k="conv">Conv</span><span data-k="tower">Tower</span><span data-k="policy">Policy</span><span data-k="value">Value</span>
+    </div>
+    <div class="hint" id="hint">Drag to orbit · scroll or pinch to zoom · tap a piece to move it</div>
+  </div>
+
+  <aside class="panel">
+    <div class="top">
+      <div><p class="eyebrow">DeepMind · 2017</p><h1>Inside AlphaZero</h1></div>
+      <a class="viewlink" href="#guide">Read the guide</a>
+    </div>
+
+    <nav class="tabs" role="tablist" aria-label="Network stage">
+      <button role="tab" data-stage="play" aria-selected="true">Play</button>
+      <button role="tab" data-stage="input">Input planes</button>
+      <button role="tab" data-stage="filter">A filter</button>
+      <button role="tab" data-stage="tower">Residual tower</button>
+      <button role="tab" data-stage="policy">Policy head</button>
+      <button role="tab" data-stage="value">Value head</button>
+    </nav>
+
+    <div class="ctl">
+      <label for="posSlider">Position <b id="posLabel"></b></label>
+      <input id="posSlider" type="range" min="0" max="33" value="0">
+    </div>
+
+    <section class="sec" data-sec="play">
+      <div class="status" id="status"></div>
+      <canvas id="pboard" width="512" height="512" aria-label="Chessboard: tap a piece, then a highlighted square"></canvas>
+      <div class="row">
+        <button class="btn" id="backBtn" aria-label="Previous move">◀ Back</button>
+        <button class="btn primary" id="playBtn">▶ Play</button>
+        <button class="btn" id="nextBtn" aria-label="Next move">Next ▶</button>
+      </div>
+      <p>Each move travels through the whole network. Watch the sheets shift back in time, the filters light up, the signal ripple through the 19 blocks, and the two heads answer.</p>
+      <label class="check" for="follow"><input type="checkbox" id="follow"> Camera follows the signal</label>
+      <p class="note">Tap a piece on this board (or the 3D one), then a highlighted square, to play your own move from any position. The sample game is Morphy's Opera Game (Paris, 1858), which ends in checkmate on move 17.</p>
+      <div class="row">
+        <button class="btn" id="operaBtn">Reload the Opera Game</button>
+        <button class="btn" id="newBtn">Start a new game</button>
+      </div>
+      <p class="note">Layer shapes match AlphaZero's 2018 paper. Its trained weights were never released, so the network here runs with random weights: it shows how signals flow, not what AlphaZero learned.</p>
+    </section>
+
+    <section class="sec" data-sec="input" hidden>
+      <h2>119 yes-or-no sheets</h2>
+      <div class="ctl">
+        <label for="planeSlider">Sheet <b id="planeNum"></b></label>
+        <input id="planeSlider" type="range" min="0" max="118" value="0">
+      </div>
+      <div class="readout" id="planeReadout"></div>
+      <div class="legend"><span><i style="background:var(--white)"></i>White pieces</span><span><i style="background:var(--black)"></i>Black pieces</span><span><i style="background:var(--muted)"></i>Repetition</span><span><i style="background:var(--const)"></i>Game state</span></div>
+      <p class="note">Each 14-sheet group is one moment in time; groups further right are older. When a move is played, every group slides one slot back and a fresh "now" group pops in. Tap a lit cell in the 3D stack to jump to its sheet. AlphaZero flips the board so the side to move is always at the bottom; this demo keeps White at the bottom so the sheets are easier to follow.</p>
+    </section>
+
+    <section class="sec" data-sec="filter" hidden>
+      <h2>A filter you can read</h2>
+      <p>A 3×3 window slides over every square, multiplies its weights by the sheets underneath, adds a bias, and keeps the result only if it's above zero.</p>
+      <div class="row" role="group" aria-label="Filter">
+        <button class="btn" id="varB" aria-pressed="true">Black pawn attacks White piece</button>
+        <button class="btn" id="varA" aria-pressed="false">White pawn attacks Black piece</button>
+      </div>
+      <div class="kernels" id="kernels"></div>
+      <div class="row">
+        <button class="btn" id="sweepBtn">Sweep the board</button>
+        <button class="btn" id="stepBtn">Next square</button>
+      </div>
+      <div class="readout" id="filterReadout"></div>
+      <p class="note">The pawn weights are 0.5 so the filter only fires when a pawn and a target are both present. Tap a square on the board to test it.</p>
+    </section>
+
+    <section class="sec" data-sec="tower" hidden>
+      <h2>Features that spread</h2>
+      <div class="ctl">
+        <label for="layerSlider">Layer <b id="layerLabel"></b></label>
+        <input id="layerSlider" type="range" min="0" max="19" value="2">
+      </div>
+      <div class="ctl">
+        <label for="chanSlider">Feature sheet <b id="chanLabel"></b></label>
+        <input id="chanSlider" type="range" min="0" max="31" value="0">
+      </div>
+      <div class="mini-wrap">
+        <canvas id="mini" width="160" height="160" aria-label="Selected feature sheet"></canvas>
+        <div class="readout" id="towerReadout"></div>
+      </div>
+      <p class="note">Each block has two 3×3 convolutions and adds its input back (the arcs above the blocks). The board overlay shows how far one square can "see" at this depth; tap the board to move it. The tower runs 32 random channels instead of AlphaZero's 256 trained ones.</p>
+    </section>
+
+    <section class="sec" data-sec="policy" hidden>
+      <h2>4,672 move slots</h2>
+      <p>A move is named by its starting square plus one of 73 sheets that says which way and how far it goes. The lit cells in the 3D stack are the slots that are legal right now; every other slot is masked out.</p>
+      <div class="readout" id="legalCount"></div>
+      <div class="movelist" id="moveList" aria-label="Legal moves"></div>
+      <div class="ctl">
+        <label for="polSlider">Sheet <b id="polNum"></b></label>
+        <input id="polSlider" type="range" min="0" max="72" value="56">
+      </div>
+      <div class="readout" id="policyReadout"></div>
+      <p class="note">Sheets 0–55 are slides (8 directions × 1 to 7 squares), 56–63 knight jumps, 64–72 promotions to knight, bishop or rook. The exact sheet order is illustrative. Tap the board to choose a starting square.</p>
+    </section>
+
+    <section class="sec" data-sec="value" hidden>
+      <h2>How good is this position?</h2>
+      <p>The value head shrinks the tower's output to one sheet, passes it through a 256-unit layer, and squashes the result into one number between −1 and +1, from the point of view of the side to move.</p>
+      <div class="meter" aria-hidden="true"><i id="meterNeedle"></i></div>
+      <div class="meter-l"><span>−1 loss</span><span>0 draw</span><span>+1 win</span></div>
+      <div class="readout" id="valueReadout"></div>
+      <p class="note">With random weights the real head would print noise, so the gauge here is driven by a stand-in: material count squashed with tanh, and ±1 at checkmate. A trained AlphaZero judges far more than material.</p>
+    </section>
+  </aside>
+</div>
+
+<main class="guide" id="guide" hidden>
+<div class="wrap">
+<div class="ghead"><div><p class="eyebrow">An illustrated guide</p><h1>How AlphaZero thinks</h1><p>Eleven steps from a chess position to a move, and from a blank network to superhuman play.</p></div><a class="viewlink" href="#explore">Open the 3D explorer</a></div>
+<section class="gs"><div class="txt"><span class="num">01 · The whole idea</span><h2>One network, one search, no human games</h2><p>AlphaZero learns chess from the rules alone. A single neural network looks at a position and gives two answers: which moves look promising, and who is winning. A tree search uses those answers to choose a move. Every game it plays against itself becomes training data that makes the network better.</p><p class="rule"><b>Principle.</b> The search makes the network's guesses better; training makes the network match the search. Each improves the other.</p></div><div class="fig"><svg viewBox="0 0 680 240" role="img" aria-label="AlphaZero&#x27;s loop: the board goes into the network, which outputs a policy and a value; the tree search uses them to pick a move; self-play games train the network." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><rect x="16.0" y="70.0" width="112.0" height="60.0" rx="8" class="f-bg" /><text x="72.0" y="97.0" class="h" text-anchor="middle" >Board</text><text x="72.0" y="114.0" class="sm mu" text-anchor="middle" >the position</text><rect x="162.0" y="70.0" width="150.0" height="60.0" rx="8" class="f-bg" /><text x="237.0" y="97.0" class="h" text-anchor="middle" >Network</text><text x="237.0" y="114.0" class="sm mu" text-anchor="middle" >19 residual blocks</text><rect x="346.0" y="26.0" width="136.0" height="52.0" rx="8" class="f-bg" /><text x="414.0" y="49.0" class="h" text-anchor="middle" >Policy p</text><text x="414.0" y="66.0" class="sm mu" text-anchor="middle" >odds for each move</text><rect x="346.0" y="122.0" width="136.0" height="52.0" rx="8" class="f-bg" /><text x="414.0" y="145.0" class="h" text-anchor="middle" >Value v</text><text x="414.0" y="162.0" class="sm mu" text-anchor="middle" >−1 loss … +1 win</text><rect x="516.0" y="70.0" width="148.0" height="60.0" rx="8" class="f-ac" /><text x="590.0" y="97.0" class="h on-ac" text-anchor="middle" >Tree search</text><text x="590.0" y="114.0" class="sm on-ac" text-anchor="middle" >800 simulations</text><rect x="516.0" y="186.0" width="148.0" height="44.0" rx="8" class="f-bg" /><text x="590.0" y="213.0" class="h" text-anchor="middle" >Play the move</text><rect x="162.0" y="186.0" width="320.0" height="44.0" rx="8" class="f-bg" /><text x="322.0" y="213.0" class="h" text-anchor="middle" >Self-play games become training data</text><line x1="128" y1="100" x2="160" y2="100" class="s-mu" stroke-width="1.6" marker-end="url(#ah1)"/><line x1="312" y1="90" x2="344" y2="56" class="s-mu" stroke-width="1.6" marker-end="url(#ah1)"/><line x1="312" y1="110" x2="344" y2="146" class="s-mu" stroke-width="1.6" marker-end="url(#ah1)"/><line x1="482" y1="52" x2="514" y2="88" class="s-mu" stroke-width="1.6" marker-end="url(#ah1)"/><line x1="482" y1="148" x2="514" y2="112" class="s-mu" stroke-width="1.6" marker-end="url(#ah1)"/><line x1="590" y1="130" x2="590" y2="184" class="s-mu" stroke-width="1.6" marker-end="url(#ah1)"/><line x1="516" y1="208" x2="484" y2="208" class="s-mu" stroke-width="1.6" marker-end="url(#ah1)"/><line x1="237" y1="186" x2="237" y2="132" class="s-mu" stroke-width="1.6" marker-end="url(#ah1)"/><path d="M 590 70 C 590 8, 237 8, 237 68" class="s-mu f-none" stroke-width="1.6" stroke-dasharray="4 4" marker-end="url(#ah1)"/><text x="414.0" y="16.0" class="sm mu" text-anchor="middle" >asks the network about every new position</text><text x="246.0" y="162.0" class="sm mu" text-anchor="start" >weights updated</text></svg></div></section>
+<section class="gs"><div class="txt"><span class="num">02 · Input planes</span><h2>The board becomes 119 yes-or-no sheets</h2><p>Each piece type of each colour gets its own 8×8 sheet: 1 where that piece stands, 0 elsewhere. Twelve piece sheets plus two repetition sheets describe one moment; AlphaZero stacks the current moment and the seven before it, then adds seven sheets for side to move, castling rights and move counters.</p><p class="rule"><b>Why sheets, not numbers?</b> Labelling a knight “2” and a bishop “3” would invent an order and arithmetic that chess doesn't have. Separate sheets let every filter treat each piece independently.</p></div><div class="fig"><svg viewBox="0 0 680 262" role="img" aria-label="One square encoded as twelve yes/no values, and the full stack of 119 sheets: 14 per moment for 8 moments, plus 7 game-state sheets." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><text x="16.0" y="30.0" class="h" text-anchor="start" >Square e4</text><rect x="16.0" y="46.0" width="12.0" height="11.0" rx="2" class="f-ac" stroke-width="1"/><text x="36.0" y="55.5" class="sm" text-anchor="start" >White pawn</text><text x="150.0" y="55.5" class="sm" text-anchor="end" >1</text><rect x="16.0" y="61.5" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="71.0" class="sm mu" text-anchor="start" >White knight</text><text x="150.0" y="71.0" class="sm mu" text-anchor="end" >0</text><rect x="16.0" y="77.0" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="86.5" class="sm mu" text-anchor="start" >White bishop</text><text x="150.0" y="86.5" class="sm mu" text-anchor="end" >0</text><rect x="16.0" y="92.5" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="102.0" class="sm mu" text-anchor="start" >White rook</text><text x="150.0" y="102.0" class="sm mu" text-anchor="end" >0</text><rect x="16.0" y="108.0" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="117.5" class="sm mu" text-anchor="start" >White queen</text><text x="150.0" y="117.5" class="sm mu" text-anchor="end" >0</text><rect x="16.0" y="123.5" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="133.0" class="sm mu" text-anchor="start" >White king</text><text x="150.0" y="133.0" class="sm mu" text-anchor="end" >0</text><rect x="16.0" y="139.0" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="148.5" class="sm mu" text-anchor="start" >Black pawn</text><text x="150.0" y="148.5" class="sm mu" text-anchor="end" >0</text><rect x="16.0" y="154.5" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="164.0" class="sm mu" text-anchor="start" >Black knight</text><text x="150.0" y="164.0" class="sm mu" text-anchor="end" >0</text><rect x="16.0" y="170.0" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="179.5" class="sm mu" text-anchor="start" >Black bishop</text><text x="150.0" y="179.5" class="sm mu" text-anchor="end" >0</text><rect x="16.0" y="185.5" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="195.0" class="sm mu" text-anchor="start" >Black rook</text><text x="150.0" y="195.0" class="sm mu" text-anchor="end" >0</text><rect x="16.0" y="201.0" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="210.5" class="sm mu" text-anchor="start" >Black queen</text><text x="150.0" y="210.5" class="sm mu" text-anchor="end" >0</text><rect x="16.0" y="216.5" width="12.0" height="11.0" rx="2" class="f-bg s-gr" stroke-width="1"/><text x="36.0" y="226.0" class="sm mu" text-anchor="start" >Black king</text><text x="150.0" y="226.0" class="sm mu" text-anchor="end" >0</text><text x="16.0" y="252.0" class="sm mu" text-anchor="start" >one-hot: one 1 per square</text><polygon points="190.0,222.0 216.0,196.0 216.0,46.0 190.0,72.0" class="f-w s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="193.1,222.0 219.1,196.0 219.1,46.0 193.1,72.0" class="f-w s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="196.2,222.0 222.2,196.0 222.2,46.0 196.2,72.0" class="f-w s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="199.3,222.0 225.3,196.0 225.3,46.0 199.3,72.0" class="f-w s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="202.4,222.0 228.4,196.0 228.4,46.0 202.4,72.0" class="f-w s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="205.5,222.0 231.5,196.0 231.5,46.0 205.5,72.0" class="f-w s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="208.6,222.0 234.6,196.0 234.6,46.0 208.6,72.0" class="f-b s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="211.7,222.0 237.7,196.0 237.7,46.0 211.7,72.0" class="f-b s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="214.8,222.0 240.8,196.0 240.8,46.0 214.8,72.0" class="f-b s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="217.9,222.0 243.9,196.0 243.9,46.0 217.9,72.0" class="f-b s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="221.0,222.0 247.0,196.0 247.0,46.0 221.0,72.0" class="f-b s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="224.1,222.0 250.1,196.0 250.1,46.0 224.1,72.0" class="f-b s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="227.2,222.0 253.2,196.0 253.2,46.0 227.2,72.0" class="f-mu s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="230.3,222.0 256.3,196.0 256.3,46.0 230.3,72.0" class="f-mu s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="239.4,222.0 265.4,196.0 265.4,46.0 239.4,72.0" class="f-w s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="242.5,222.0 268.5,196.0 268.5,46.0 242.5,72.0" class="f-w s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="245.6,222.0 271.6,196.0 271.6,46.0 245.6,72.0" class="f-w s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="248.7,222.0 274.7,196.0 274.7,46.0 248.7,72.0" class="f-w s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="251.8,222.0 277.8,196.0 277.8,46.0 251.8,72.0" class="f-w s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="254.9,222.0 280.9,196.0 280.9,46.0 254.9,72.0" class="f-w s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="258.0,222.0 284.0,196.0 284.0,46.0 258.0,72.0" class="f-b s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="261.1,222.0 287.1,196.0 287.1,46.0 261.1,72.0" class="f-b s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="264.2,222.0 290.2,196.0 290.2,46.0 264.2,72.0" class="f-b s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="267.3,222.0 293.3,196.0 293.3,46.0 267.3,72.0" class="f-b s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="270.4,222.0 296.4,196.0 296.4,46.0 270.4,72.0" class="f-b s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="273.5,222.0 299.5,196.0 299.5,46.0 273.5,72.0" class="f-b s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="276.6,222.0 302.6,196.0 302.6,46.0 276.6,72.0" class="f-mu s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="279.7,222.0 305.7,196.0 305.7,46.0 279.7,72.0" class="f-mu s-sf" opacity="0.91" stroke-width="0.6"/><polygon points="288.8,222.0 314.8,196.0 314.8,46.0 288.8,72.0" class="f-w s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="291.9,222.0 317.9,196.0 317.9,46.0 291.9,72.0" class="f-w s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="295.0,222.0 321.0,196.0 321.0,46.0 295.0,72.0" class="f-w s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="298.1,222.0 324.1,196.0 324.1,46.0 298.1,72.0" class="f-w s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="301.2,222.0 327.2,196.0 327.2,46.0 301.2,72.0" class="f-w s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="304.3,222.0 330.3,196.0 330.3,46.0 304.3,72.0" class="f-w s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="307.4,222.0 333.4,196.0 333.4,46.0 307.4,72.0" class="f-b s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="310.5,222.0 336.5,196.0 336.5,46.0 310.5,72.0" class="f-b s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="313.6,222.0 339.6,196.0 339.6,46.0 313.6,72.0" class="f-b s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="316.7,222.0 342.7,196.0 342.7,46.0 316.7,72.0" class="f-b s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="319.8,222.0 345.8,196.0 345.8,46.0 319.8,72.0" class="f-b s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="322.9,222.0 348.9,196.0 348.9,46.0 322.9,72.0" class="f-b s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="326.0,222.0 352.0,196.0 352.0,46.0 326.0,72.0" class="f-mu s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="329.1,222.0 355.1,196.0 355.1,46.0 329.1,72.0" class="f-mu s-sf" opacity="0.82" stroke-width="0.6"/><polygon points="338.2,222.0 364.2,196.0 364.2,46.0 338.2,72.0" class="f-w s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="341.3,222.0 367.3,196.0 367.3,46.0 341.3,72.0" class="f-w s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="344.4,222.0 370.4,196.0 370.4,46.0 344.4,72.0" class="f-w s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="347.5,222.0 373.5,196.0 373.5,46.0 347.5,72.0" class="f-w s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="350.6,222.0 376.6,196.0 376.6,46.0 350.6,72.0" class="f-w s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="353.7,222.0 379.7,196.0 379.7,46.0 353.7,72.0" class="f-w s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="356.8,222.0 382.8,196.0 382.8,46.0 356.8,72.0" class="f-b s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="359.9,222.0 385.9,196.0 385.9,46.0 359.9,72.0" class="f-b s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="363.0,222.0 389.0,196.0 389.0,46.0 363.0,72.0" class="f-b s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="366.1,222.0 392.1,196.0 392.1,46.0 366.1,72.0" class="f-b s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="369.2,222.0 395.2,196.0 395.2,46.0 369.2,72.0" class="f-b s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="372.3,222.0 398.3,196.0 398.3,46.0 372.3,72.0" class="f-b s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="375.4,222.0 401.4,196.0 401.4,46.0 375.4,72.0" class="f-mu s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="378.5,222.0 404.5,196.0 404.5,46.0 378.5,72.0" class="f-mu s-sf" opacity="0.73" stroke-width="0.6"/><polygon points="387.6,222.0 413.6,196.0 413.6,46.0 387.6,72.0" class="f-w s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="390.7,222.0 416.7,196.0 416.7,46.0 390.7,72.0" class="f-w s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="393.8,222.0 419.8,196.0 419.8,46.0 393.8,72.0" class="f-w s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="396.9,222.0 422.9,196.0 422.9,46.0 396.9,72.0" class="f-w s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="400.0,222.0 426.0,196.0 426.0,46.0 400.0,72.0" class="f-w s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="403.1,222.0 429.1,196.0 429.1,46.0 403.1,72.0" class="f-w s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="406.2,222.0 432.2,196.0 432.2,46.0 406.2,72.0" class="f-b s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="409.3,222.0 435.3,196.0 435.3,46.0 409.3,72.0" class="f-b s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="412.4,222.0 438.4,196.0 438.4,46.0 412.4,72.0" class="f-b s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="415.5,222.0 441.5,196.0 441.5,46.0 415.5,72.0" class="f-b s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="418.6,222.0 444.6,196.0 444.6,46.0 418.6,72.0" class="f-b s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="421.7,222.0 447.7,196.0 447.7,46.0 421.7,72.0" class="f-b s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="424.8,222.0 450.8,196.0 450.8,46.0 424.8,72.0" class="f-mu s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="427.9,222.0 453.9,196.0 453.9,46.0 427.9,72.0" class="f-mu s-sf" opacity="0.64" stroke-width="0.6"/><polygon points="437.0,222.0 463.0,196.0 463.0,46.0 437.0,72.0" class="f-w s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="440.1,222.0 466.1,196.0 466.1,46.0 440.1,72.0" class="f-w s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="443.2,222.0 469.2,196.0 469.2,46.0 443.2,72.0" class="f-w s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="446.3,222.0 472.3,196.0 472.3,46.0 446.3,72.0" class="f-w s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="449.4,222.0 475.4,196.0 475.4,46.0 449.4,72.0" class="f-w s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="452.5,222.0 478.5,196.0 478.5,46.0 452.5,72.0" class="f-w s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="455.6,222.0 481.6,196.0 481.6,46.0 455.6,72.0" class="f-b s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="458.7,222.0 484.7,196.0 484.7,46.0 458.7,72.0" class="f-b s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="461.8,222.0 487.8,196.0 487.8,46.0 461.8,72.0" class="f-b s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="464.9,222.0 490.9,196.0 490.9,46.0 464.9,72.0" class="f-b s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="468.0,222.0 494.0,196.0 494.0,46.0 468.0,72.0" class="f-b s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="471.1,222.0 497.1,196.0 497.1,46.0 471.1,72.0" class="f-b s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="474.2,222.0 500.2,196.0 500.2,46.0 474.2,72.0" class="f-mu s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="477.3,222.0 503.3,196.0 503.3,46.0 477.3,72.0" class="f-mu s-sf" opacity="0.55" stroke-width="0.6"/><polygon points="486.4,222.0 512.4,196.0 512.4,46.0 486.4,72.0" class="f-w s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="489.5,222.0 515.5,196.0 515.5,46.0 489.5,72.0" class="f-w s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="492.6,222.0 518.6,196.0 518.6,46.0 492.6,72.0" class="f-w s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="495.7,222.0 521.7,196.0 521.7,46.0 495.7,72.0" class="f-w s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="498.8,222.0 524.8,196.0 524.8,46.0 498.8,72.0" class="f-w s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="501.9,222.0 527.9,196.0 527.9,46.0 501.9,72.0" class="f-w s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="505.0,222.0 531.0,196.0 531.0,46.0 505.0,72.0" class="f-b s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="508.1,222.0 534.1,196.0 534.1,46.0 508.1,72.0" class="f-b s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="511.2,222.0 537.2,196.0 537.2,46.0 511.2,72.0" class="f-b s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="514.3,222.0 540.3,196.0 540.3,46.0 514.3,72.0" class="f-b s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="517.4,222.0 543.4,196.0 543.4,46.0 517.4,72.0" class="f-b s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="520.5,222.0 546.5,196.0 546.5,46.0 520.5,72.0" class="f-b s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="523.6,222.0 549.6,196.0 549.6,46.0 523.6,72.0" class="f-mu s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="526.7,222.0 552.7,196.0 552.7,46.0 526.7,72.0" class="f-mu s-sf" opacity="0.46" stroke-width="0.6"/><polygon points="535.8,222.0 561.8,196.0 561.8,46.0 535.8,72.0" class="f-w s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="538.9,222.0 564.9,196.0 564.9,46.0 538.9,72.0" class="f-w s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="542.0,222.0 568.0,196.0 568.0,46.0 542.0,72.0" class="f-w s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="545.1,222.0 571.1,196.0 571.1,46.0 545.1,72.0" class="f-w s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="548.2,222.0 574.2,196.0 574.2,46.0 548.2,72.0" class="f-w s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="551.3,222.0 577.3,196.0 577.3,46.0 551.3,72.0" class="f-w s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="554.4,222.0 580.4,196.0 580.4,46.0 554.4,72.0" class="f-b s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="557.5,222.0 583.5,196.0 583.5,46.0 557.5,72.0" class="f-b s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="560.6,222.0 586.6,196.0 586.6,46.0 560.6,72.0" class="f-b s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="563.7,222.0 589.7,196.0 589.7,46.0 563.7,72.0" class="f-b s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="566.8,222.0 592.8,196.0 592.8,46.0 566.8,72.0" class="f-b s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="569.9,222.0 595.9,196.0 595.9,46.0 569.9,72.0" class="f-b s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="573.0,222.0 599.0,196.0 599.0,46.0 573.0,72.0" class="f-mu s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="576.1,222.0 602.1,196.0 602.1,46.0 576.1,72.0" class="f-mu s-sf" opacity="0.37" stroke-width="0.6"/><polygon points="586.1,222.0 612.1,196.0 612.1,46.0 586.1,72.0" class="f-c s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="590.1,222.0 616.1,196.0 616.1,46.0 590.1,72.0" class="f-c s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="594.1,222.0 620.1,196.0 620.1,46.0 594.1,72.0" class="f-c s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="598.1,222.0 624.1,196.0 624.1,46.0 598.1,72.0" class="f-c s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="602.1,222.0 628.1,196.0 628.1,46.0 602.1,72.0" class="f-c s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="606.1,222.0 632.1,196.0 632.1,46.0 606.1,72.0" class="f-c s-sf" opacity="1.00" stroke-width="0.6"/><polygon points="610.1,222.0 636.1,196.0 636.1,46.0 610.1,72.0" class="f-c s-sf" opacity="1.00" stroke-width="0.6"/><text x="220.0" y="244.0" class="sm" text-anchor="middle" >now</text><text x="269.4" y="244.0" class="sm mu" text-anchor="middle" >T−1</text><text x="565.8" y="244.0" class="sm mu" text-anchor="middle" >T−7</text><text x="612.1" y="244.0" class="sm mu" text-anchor="middle" >state</text><text x="190.0" y="30.0" class="h" text-anchor="start" >14 × 8 moments + 7 state sheets = 119</text></svg></div></section>
+<section class="gs"><div class="txt"><span class="num">03 · Convolution</span><h2>A 3×3 window that reaches through all the sheets</h2><p>A filter has a 3×3 grid of weights for every input sheet, 1,071 weights in all. At each square it multiplies those weights by the values underneath, adds everything into one number, adds a bias and keeps it only if it's positive. Sliding over all 64 squares gives one new 8×8 sheet. The first layer has 256 filters, so it outputs 8×8×256.</p><p class="rule"><b>Principle.</b> The same filter is used on every square, because a pattern means the same thing on the c-file as on the g-file. Nobody designs the weights: training finds them.</p></div><div class="fig"><svg viewBox="0 0 680 250" role="img" aria-label="A 3 by 3 window reaches through all 119 input sheets and produces one number per square; one filter makes one output sheet, 256 filters make 256 sheets." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><polygon points="69.0,175.0 173.0,175.0 221.0,110.5 117.0,110.5" class="f-sf s-gr" stroke-width="1" opacity="0.92"/><line x1="82.0" y1="175.0" x2="130.0" y2="110.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="75.0" y1="166.9" x2="179.0" y2="166.9" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="95.0" y1="175.0" x2="143.0" y2="110.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="81.0" y1="158.9" x2="185.0" y2="158.9" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="108.0" y1="175.0" x2="156.0" y2="110.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="87.0" y1="150.8" x2="191.0" y2="150.8" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="121.0" y1="175.0" x2="169.0" y2="110.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="93.0" y1="142.8" x2="197.0" y2="142.8" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="134.0" y1="175.0" x2="182.0" y2="110.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="99.0" y1="134.7" x2="203.0" y2="134.7" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="147.0" y1="175.0" x2="195.0" y2="110.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="105.0" y1="126.6" x2="209.0" y2="126.6" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="160.0" y1="175.0" x2="208.0" y2="110.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="111.0" y1="118.6" x2="215.0" y2="118.6" class="s-gr" stroke-width="0.6" opacity="0.92"/><polygon points="126.0,150.8 165.0,150.8 183.0,126.6 144.0,126.6" class="f-ac" opacity="0.78"/><polygon points="60.0,182.0 164.0,182.0 212.0,117.5 108.0,117.5" class="f-sf s-gr" stroke-width="1" opacity="0.92"/><line x1="73.0" y1="182.0" x2="121.0" y2="117.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="66.0" y1="173.9" x2="170.0" y2="173.9" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="86.0" y1="182.0" x2="134.0" y2="117.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="72.0" y1="165.9" x2="176.0" y2="165.9" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="99.0" y1="182.0" x2="147.0" y2="117.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="78.0" y1="157.8" x2="182.0" y2="157.8" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="112.0" y1="182.0" x2="160.0" y2="117.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="84.0" y1="149.8" x2="188.0" y2="149.8" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="125.0" y1="182.0" x2="173.0" y2="117.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="90.0" y1="141.7" x2="194.0" y2="141.7" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="138.0" y1="182.0" x2="186.0" y2="117.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="96.0" y1="133.6" x2="200.0" y2="133.6" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="151.0" y1="182.0" x2="199.0" y2="117.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="102.0" y1="125.6" x2="206.0" y2="125.6" class="s-gr" stroke-width="0.6" opacity="0.92"/><polygon points="117.0,157.8 156.0,157.8 174.0,133.6 135.0,133.6" class="f-ac" opacity="0.78"/><polygon points="51.0,189.0 155.0,189.0 203.0,124.5 99.0,124.5" class="f-sf s-gr" stroke-width="1" opacity="0.92"/><line x1="64.0" y1="189.0" x2="112.0" y2="124.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="57.0" y1="180.9" x2="161.0" y2="180.9" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="77.0" y1="189.0" x2="125.0" y2="124.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="63.0" y1="172.9" x2="167.0" y2="172.9" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="90.0" y1="189.0" x2="138.0" y2="124.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="69.0" y1="164.8" x2="173.0" y2="164.8" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="103.0" y1="189.0" x2="151.0" y2="124.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="75.0" y1="156.8" x2="179.0" y2="156.8" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="116.0" y1="189.0" x2="164.0" y2="124.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="81.0" y1="148.7" x2="185.0" y2="148.7" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="129.0" y1="189.0" x2="177.0" y2="124.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="87.0" y1="140.6" x2="191.0" y2="140.6" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="142.0" y1="189.0" x2="190.0" y2="124.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="93.0" y1="132.6" x2="197.0" y2="132.6" class="s-gr" stroke-width="0.6" opacity="0.92"/><polygon points="108.0,164.8 147.0,164.8 165.0,140.6 126.0,140.6" class="f-ac" opacity="0.78"/><polygon points="42.0,196.0 146.0,196.0 194.0,131.5 90.0,131.5" class="f-sf s-gr" stroke-width="1" opacity="0.92"/><line x1="55.0" y1="196.0" x2="103.0" y2="131.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="48.0" y1="187.9" x2="152.0" y2="187.9" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="68.0" y1="196.0" x2="116.0" y2="131.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="54.0" y1="179.9" x2="158.0" y2="179.9" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="81.0" y1="196.0" x2="129.0" y2="131.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="60.0" y1="171.8" x2="164.0" y2="171.8" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="94.0" y1="196.0" x2="142.0" y2="131.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="66.0" y1="163.8" x2="170.0" y2="163.8" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="107.0" y1="196.0" x2="155.0" y2="131.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="72.0" y1="155.7" x2="176.0" y2="155.7" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="120.0" y1="196.0" x2="168.0" y2="131.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="78.0" y1="147.6" x2="182.0" y2="147.6" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="133.0" y1="196.0" x2="181.0" y2="131.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="84.0" y1="139.6" x2="188.0" y2="139.6" class="s-gr" stroke-width="0.6" opacity="0.92"/><polygon points="99.0,171.8 138.0,171.8 156.0,147.6 117.0,147.6" class="f-ac" opacity="0.78"/><polygon points="33.0,203.0 137.0,203.0 185.0,138.5 81.0,138.5" class="f-sf s-gr" stroke-width="1" opacity="0.92"/><line x1="46.0" y1="203.0" x2="94.0" y2="138.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="39.0" y1="194.9" x2="143.0" y2="194.9" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="59.0" y1="203.0" x2="107.0" y2="138.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="45.0" y1="186.9" x2="149.0" y2="186.9" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="72.0" y1="203.0" x2="120.0" y2="138.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="51.0" y1="178.8" x2="155.0" y2="178.8" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="85.0" y1="203.0" x2="133.0" y2="138.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="57.0" y1="170.8" x2="161.0" y2="170.8" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="98.0" y1="203.0" x2="146.0" y2="138.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="63.0" y1="162.7" x2="167.0" y2="162.7" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="111.0" y1="203.0" x2="159.0" y2="138.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="69.0" y1="154.6" x2="173.0" y2="154.6" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="124.0" y1="203.0" x2="172.0" y2="138.5" class="s-gr" stroke-width="0.6" opacity="0.92"/><line x1="75.0" y1="146.6" x2="179.0" y2="146.6" class="s-gr" stroke-width="0.6" opacity="0.92"/><polygon points="90.0,178.8 129.0,178.8 147.0,154.6 108.0,154.6" class="f-ac" opacity="0.78"/><polygon points="24.0,210.0 128.0,210.0 176.0,145.5 72.0,145.5" class="f-sf s-gr" stroke-width="1" opacity="1.0"/><line x1="37.0" y1="210.0" x2="85.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="30.0" y1="201.9" x2="134.0" y2="201.9" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="50.0" y1="210.0" x2="98.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="36.0" y1="193.9" x2="140.0" y2="193.9" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="63.0" y1="210.0" x2="111.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="42.0" y1="185.8" x2="146.0" y2="185.8" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="76.0" y1="210.0" x2="124.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="48.0" y1="177.8" x2="152.0" y2="177.8" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="89.0" y1="210.0" x2="137.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="54.0" y1="169.7" x2="158.0" y2="169.7" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="102.0" y1="210.0" x2="150.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="60.0" y1="161.6" x2="164.0" y2="161.6" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="115.0" y1="210.0" x2="163.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="66.0" y1="153.6" x2="170.0" y2="153.6" class="s-gr" stroke-width="0.6" opacity="1.0"/><polygon points="81.0,185.8 120.0,185.8 138.0,161.6 99.0,161.6" class="f-ac" opacity="0.85"/><text x="24.0" y="236.0" class="sm mu" text-anchor="start" >input · 8×8×119 (6 of 119 drawn)</text><text x="24.0" y="24.0" class="h" text-anchor="start" >one filter = 3×3 × 119 weights</text><line x1="250" y1="140" x2="330" y2="140" class="s-mu" stroke-width="1.6" marker-end="url(#ah3)"/><text x="290.0" y="118.0" class="sm mu" text-anchor="middle" >multiply, add,</text><text x="290.0" y="132.0" class="sm mu" text-anchor="middle" >+ bias, ReLU</text><text x="290.0" y="160.0" class="sm" text-anchor="middle" >1,071 weights</text><polygon points="340.0,210.0 444.0,210.0 492.0,145.5 388.0,145.5" class="f-sf s-gr" stroke-width="1" opacity="1.0"/><line x1="353.0" y1="210.0" x2="401.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="346.0" y1="201.9" x2="450.0" y2="201.9" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="366.0" y1="210.0" x2="414.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="352.0" y1="193.9" x2="456.0" y2="193.9" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="379.0" y1="210.0" x2="427.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="358.0" y1="185.8" x2="462.0" y2="185.8" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="392.0" y1="210.0" x2="440.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="364.0" y1="177.8" x2="468.0" y2="177.8" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="405.0" y1="210.0" x2="453.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="370.0" y1="169.7" x2="474.0" y2="169.7" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="418.0" y1="210.0" x2="466.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="376.0" y1="161.6" x2="480.0" y2="161.6" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="431.0" y1="210.0" x2="479.0" y2="145.5" class="s-gr" stroke-width="0.6" opacity="1.0"/><line x1="382.0" y1="153.6" x2="486.0" y2="153.6" class="s-gr" stroke-width="0.6" opacity="1.0"/><polygon points="416.0,177.8 429.0,177.8 435.0,169.7 422.0,169.7" class="f-ac" opacity="0.85"/><text x="340.0" y="236.0" class="sm" text-anchor="start" >1 filter → 1 sheet</text><line x1="500" y1="140" x2="540" y2="140" class="s-mu" stroke-width="1.6" marker-end="url(#ah3)"/><polygon points="590.0,175.0 646.0,175.0 674.0,140.3 618.0,140.3" class="f-sf s-gr" stroke-width="1" opacity="0.9"/><line x1="597.0" y1="175.0" x2="625.0" y2="140.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="593.5" y1="170.7" x2="649.5" y2="170.7" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="604.0" y1="175.0" x2="632.0" y2="140.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="597.0" y1="166.3" x2="653.0" y2="166.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="611.0" y1="175.0" x2="639.0" y2="140.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="600.5" y1="162.0" x2="656.5" y2="162.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="618.0" y1="175.0" x2="646.0" y2="140.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="604.0" y1="157.6" x2="660.0" y2="157.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="625.0" y1="175.0" x2="653.0" y2="140.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="607.5" y1="153.3" x2="663.5" y2="153.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="632.0" y1="175.0" x2="660.0" y2="140.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="611.0" y1="149.0" x2="667.0" y2="149.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="639.0" y1="175.0" x2="667.0" y2="140.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="614.5" y1="144.6" x2="670.5" y2="144.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><polygon points="584.0,180.0 640.0,180.0 668.0,145.3 612.0,145.3" class="f-sf s-gr" stroke-width="1" opacity="0.9"/><line x1="591.0" y1="180.0" x2="619.0" y2="145.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="587.5" y1="175.7" x2="643.5" y2="175.7" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="598.0" y1="180.0" x2="626.0" y2="145.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="591.0" y1="171.3" x2="647.0" y2="171.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="605.0" y1="180.0" x2="633.0" y2="145.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="594.5" y1="167.0" x2="650.5" y2="167.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="612.0" y1="180.0" x2="640.0" y2="145.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="598.0" y1="162.6" x2="654.0" y2="162.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="619.0" y1="180.0" x2="647.0" y2="145.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="601.5" y1="158.3" x2="657.5" y2="158.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="626.0" y1="180.0" x2="654.0" y2="145.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="605.0" y1="154.0" x2="661.0" y2="154.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="633.0" y1="180.0" x2="661.0" y2="145.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="608.5" y1="149.6" x2="664.5" y2="149.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><polygon points="578.0,185.0 634.0,185.0 662.0,150.3 606.0,150.3" class="f-sf s-gr" stroke-width="1" opacity="0.9"/><line x1="585.0" y1="185.0" x2="613.0" y2="150.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="581.5" y1="180.7" x2="637.5" y2="180.7" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="592.0" y1="185.0" x2="620.0" y2="150.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="585.0" y1="176.3" x2="641.0" y2="176.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="599.0" y1="185.0" x2="627.0" y2="150.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="588.5" y1="172.0" x2="644.5" y2="172.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="606.0" y1="185.0" x2="634.0" y2="150.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="592.0" y1="167.6" x2="648.0" y2="167.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="613.0" y1="185.0" x2="641.0" y2="150.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="595.5" y1="163.3" x2="651.5" y2="163.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="620.0" y1="185.0" x2="648.0" y2="150.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="599.0" y1="159.0" x2="655.0" y2="159.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="627.0" y1="185.0" x2="655.0" y2="150.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="602.5" y1="154.6" x2="658.5" y2="154.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><polygon points="572.0,190.0 628.0,190.0 656.0,155.3 600.0,155.3" class="f-sf s-gr" stroke-width="1" opacity="0.9"/><line x1="579.0" y1="190.0" x2="607.0" y2="155.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="575.5" y1="185.7" x2="631.5" y2="185.7" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="586.0" y1="190.0" x2="614.0" y2="155.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="579.0" y1="181.3" x2="635.0" y2="181.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="593.0" y1="190.0" x2="621.0" y2="155.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="582.5" y1="177.0" x2="638.5" y2="177.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="600.0" y1="190.0" x2="628.0" y2="155.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="586.0" y1="172.6" x2="642.0" y2="172.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="607.0" y1="190.0" x2="635.0" y2="155.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="589.5" y1="168.3" x2="645.5" y2="168.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="614.0" y1="190.0" x2="642.0" y2="155.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="593.0" y1="164.0" x2="649.0" y2="164.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="621.0" y1="190.0" x2="649.0" y2="155.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="596.5" y1="159.6" x2="652.5" y2="159.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><polygon points="566.0,195.0 622.0,195.0 650.0,160.3 594.0,160.3" class="f-sf s-gr" stroke-width="1" opacity="0.9"/><line x1="573.0" y1="195.0" x2="601.0" y2="160.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="569.5" y1="190.7" x2="625.5" y2="190.7" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="580.0" y1="195.0" x2="608.0" y2="160.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="573.0" y1="186.3" x2="629.0" y2="186.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="587.0" y1="195.0" x2="615.0" y2="160.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="576.5" y1="182.0" x2="632.5" y2="182.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="594.0" y1="195.0" x2="622.0" y2="160.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="580.0" y1="177.6" x2="636.0" y2="177.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="601.0" y1="195.0" x2="629.0" y2="160.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="583.5" y1="173.3" x2="639.5" y2="173.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="608.0" y1="195.0" x2="636.0" y2="160.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="587.0" y1="169.0" x2="643.0" y2="169.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="615.0" y1="195.0" x2="643.0" y2="160.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="590.5" y1="164.6" x2="646.5" y2="164.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><polygon points="560.0,200.0 616.0,200.0 644.0,165.3 588.0,165.3" class="f-sf s-gr" stroke-width="1" opacity="0.9"/><line x1="567.0" y1="200.0" x2="595.0" y2="165.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="563.5" y1="195.7" x2="619.5" y2="195.7" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="574.0" y1="200.0" x2="602.0" y2="165.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="567.0" y1="191.3" x2="623.0" y2="191.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="581.0" y1="200.0" x2="609.0" y2="165.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="570.5" y1="187.0" x2="626.5" y2="187.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="588.0" y1="200.0" x2="616.0" y2="165.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="574.0" y1="182.6" x2="630.0" y2="182.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="595.0" y1="200.0" x2="623.0" y2="165.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="577.5" y1="178.3" x2="633.5" y2="178.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="602.0" y1="200.0" x2="630.0" y2="165.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="581.0" y1="174.0" x2="637.0" y2="174.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="609.0" y1="200.0" x2="637.0" y2="165.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="584.5" y1="169.6" x2="640.5" y2="169.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><polygon points="554.0,205.0 610.0,205.0 638.0,170.3 582.0,170.3" class="f-sf s-gr" stroke-width="1" opacity="0.9"/><line x1="561.0" y1="205.0" x2="589.0" y2="170.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="557.5" y1="200.7" x2="613.5" y2="200.7" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="568.0" y1="205.0" x2="596.0" y2="170.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="561.0" y1="196.3" x2="617.0" y2="196.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="575.0" y1="205.0" x2="603.0" y2="170.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="564.5" y1="192.0" x2="620.5" y2="192.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="582.0" y1="205.0" x2="610.0" y2="170.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="568.0" y1="187.6" x2="624.0" y2="187.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="589.0" y1="205.0" x2="617.0" y2="170.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="571.5" y1="183.3" x2="627.5" y2="183.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="596.0" y1="205.0" x2="624.0" y2="170.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="575.0" y1="179.0" x2="631.0" y2="179.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="603.0" y1="205.0" x2="631.0" y2="170.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="578.5" y1="174.6" x2="634.5" y2="174.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><polygon points="548.0,210.0 604.0,210.0 632.0,175.3 576.0,175.3" class="f-ac s-gr" stroke-width="1" opacity="0.9"/><line x1="555.0" y1="210.0" x2="583.0" y2="175.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="551.5" y1="205.7" x2="607.5" y2="205.7" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="562.0" y1="210.0" x2="590.0" y2="175.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="555.0" y1="201.3" x2="611.0" y2="201.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="569.0" y1="210.0" x2="597.0" y2="175.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="558.5" y1="197.0" x2="614.5" y2="197.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="576.0" y1="210.0" x2="604.0" y2="175.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="562.0" y1="192.6" x2="618.0" y2="192.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="583.0" y1="210.0" x2="611.0" y2="175.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="565.5" y1="188.3" x2="621.5" y2="188.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="590.0" y1="210.0" x2="618.0" y2="175.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="569.0" y1="184.0" x2="625.0" y2="184.0" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="597.0" y1="210.0" x2="625.0" y2="175.3" class="s-gr" stroke-width="0.6" opacity="0.9"/><line x1="572.5" y1="179.6" x2="628.5" y2="179.6" class="s-gr" stroke-width="0.6" opacity="0.9"/><text x="548.0" y="236.0" class="sm" text-anchor="start" >256 filters → 8×8×256</text></svg></div></section>
+<section class="gs"><div class="txt"><span class="num">04 · Residual tower</span><h2>19 blocks that build bigger ideas</h2><p>Each block runs two 3×3 convolutions with batch normalisation, then adds its own input back before the final ReLU. Stacking blocks lets each square's features depend on a wider and wider patch of the board. After three blocks, every square can be influenced by every other square.</p><p class="rule"><b>Why the skip connection?</b> Adding the input back means a block only has to learn a correction. That keeps information flowing through a very deep network and makes it trainable.</p></div><div class="fig"><svg viewBox="0 0 680 254" role="img" aria-label="A residual block: two 3 by 3 convolutions with the input added back, and a chart of how the visible patch grows from 3 by 3 to 15 by 15." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><circle cx="34" cy="86" r="18" class="f-bg"/><text x="34.0" y="91.0" class="h" text-anchor="middle" >x</text><rect x="78.0" y="64.0" width="150.0" height="44.0" rx="8" class="f-bg" /><text x="153.0" y="83.0" class="h" text-anchor="middle" >3×3 conv</text><text x="153.0" y="100.0" class="sm mu" text-anchor="middle" >BN · ReLU</text><rect x="258.0" y="64.0" width="150.0" height="44.0" rx="8" class="f-bg" /><text x="333.0" y="83.0" class="h" text-anchor="middle" >3×3 conv</text><text x="333.0" y="100.0" class="sm mu" text-anchor="middle" >BN</text><circle cx="452" cy="86" r="18" class="f-ac"/><text x="452.0" y="92.0" class="h on-ac" text-anchor="middle" >+</text><rect x="496.0" y="64.0" width="86.0" height="44.0" rx="8" class="f-bg" /><text x="539.0" y="91.0" class="h" text-anchor="middle" >ReLU</text><text x="640.0" y="91.0" class="h" text-anchor="middle" >out</text><line x1="52" y1="86" x2="76" y2="86" class="s-mu" stroke-width="1.6" marker-end="url(#ah4)"/><line x1="228" y1="86" x2="256" y2="86" class="s-mu" stroke-width="1.6" marker-end="url(#ah4)"/><line x1="408" y1="86" x2="432" y2="86" class="s-mu" stroke-width="1.6" marker-end="url(#ah4)"/><line x1="470" y1="86" x2="494" y2="86" class="s-mu" stroke-width="1.6" marker-end="url(#ah4)"/><line x1="582" y1="86" x2="620" y2="86" class="s-mu" stroke-width="1.6" marker-end="url(#ah4)"/><path d="M 34 68 C 34 20, 452 20, 452 66" class="s-mu f-none" stroke-width="1.6" marker-end="url(#ah4)"/><text x="243.0" y="14.0" class="sm mu" text-anchor="middle" >skip connection: the block&#x27;s input is added back</text><text x="16.0" y="152.0" class="h" text-anchor="start" >How far one square sees</text><text x="16.0" y="178.0" class="sm mu" text-anchor="start" >first conv</text><rect x="130.0" y="166.0" width="86.0" height="14.0" rx="3" class="f-gr" /><text x="224.0" y="178.0" class="sm" text-anchor="start" >3×3</text><text x="16.0" y="198.0" class="sm mu" text-anchor="start" >after block 1</text><rect x="130.0" y="186.0" width="200.7" height="14.0" rx="3" class="f-gr" /><text x="338.7" y="198.0" class="sm" text-anchor="start" >7×7</text><text x="16.0" y="218.0" class="sm mu" text-anchor="start" >after block 2</text><rect x="130.0" y="206.0" width="315.3" height="14.0" rx="3" class="f-gr" /><text x="453.3" y="218.0" class="sm" text-anchor="start" >11×11</text><text x="16.0" y="238.0" class="sm mu" text-anchor="start" >after block 3</text><rect x="130.0" y="226.0" width="430.0" height="14.0" rx="3" class="f-ac" /><text x="568.0" y="238.0" class="sm" text-anchor="start" >15×15  whole board from any square</text></svg></div></section>
+<section class="gs"><div class="txt"><span class="num">05 · Long-range pieces</span><h2>How 3×3 filters can see a bishop across the board</h2><p>No single 3×3 filter can see a bishop five squares away. But a stack of layers can pass a ray along one square per layer, stopping at the first piece in the way, just like the real piece. Real trained networks contain this kind of first step: filters that respond to a bishop or queen on the diagonal neighbours.</p><p class="rule"><b>Principle.</b> Depth turns local rules into long-range knowledge. Small filters, many layers.</p></div><div class="fig"><svg viewBox="0 0 680 240" role="img" aria-label="A bishop&#x27;s attack travels one square per layer along the diagonal and stops at the first blocking piece." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><rect x="20.0" y="198.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="46.0" y="198.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="72.0" y="198.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="98.0" y="198.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="124.0" y="198.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="150.0" y="198.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="176.0" y="198.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="202.0" y="198.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="20.0" y="172.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="46.0" y="172.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="72.0" y="172.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="98.0" y="172.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="124.0" y="172.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="150.0" y="172.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="176.0" y="172.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="202.0" y="172.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="20.0" y="146.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="46.0" y="146.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="72.0" y="146.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="98.0" y="146.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="124.0" y="146.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="150.0" y="146.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="176.0" y="146.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="202.0" y="146.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="20.0" y="120.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="46.0" y="120.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="72.0" y="120.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="98.0" y="120.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="124.0" y="120.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="150.0" y="120.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="176.0" y="120.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="202.0" y="120.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="20.0" y="94.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="46.0" y="94.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="72.0" y="94.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="98.0" y="94.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="124.0" y="94.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="150.0" y="94.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="176.0" y="94.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="202.0" y="94.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="20.0" y="68.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="46.0" y="68.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="72.0" y="68.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="98.0" y="68.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="124.0" y="68.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="150.0" y="68.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="176.0" y="68.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="202.0" y="68.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="20.0" y="42.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="46.0" y="42.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="72.0" y="42.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="98.0" y="42.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="124.0" y="42.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="150.0" y="42.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="176.0" y="42.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="202.0" y="42.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="20.0" y="16.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="46.0" y="16.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="72.0" y="16.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="98.0" y="16.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="124.0" y="16.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="150.0" y="16.0" width="26.0" height="26.0" rx="0" class="f-gr" /><rect x="176.0" y="16.0" width="26.0" height="26.0" rx="0" class="f-bg" /><rect x="202.0" y="16.0" width="26.0" height="26.0" rx="0" class="f-gr" /><text x="85.0" y="218.0" class="h" text-anchor="middle" style="font-size:20px">♝</text><circle cx="111.0" cy="185.0" r="10" class="f-ac"/><text x="111.0" y="189.0" class="sm on-ac" text-anchor="middle" >1</text><circle cx="137.0" cy="159.0" r="10" class="f-ac"/><text x="137.0" y="163.0" class="sm on-ac" text-anchor="middle" >2</text><circle cx="163.0" cy="133.0" r="10" class="f-ac"/><text x="163.0" y="137.0" class="sm on-ac" text-anchor="middle" >3</text><text x="189.0" y="114.0" class="h" text-anchor="middle" style="font-size:20px">♞</text><line x1="207.0" y1="73.0" x2="223.0" y2="89.0" class="s-mu" stroke-width="2"/><line x1="223.0" y1="73.0" x2="207.0" y2="89.0" class="s-mu" stroke-width="2"/><text x="250.0" y="40.0" class="h" text-anchor="start" >A ray sheet for “bishop shining north-east”</text><text x="250.0" y="66.0" class="sm mu" text-anchor="start" xml:space="preserve">Each layer looks only at the south-west neighbour.</text><text x="250.0" y="84.0" class="sm" text-anchor="start" xml:space="preserve">The ray reaches a square if:</text><text x="250.0" y="102.0" class="sm mu" text-anchor="start" xml:space="preserve">  · a bishop or queen stands on that neighbour, or</text><text x="250.0" y="120.0" class="sm mu" text-anchor="start" xml:space="preserve">  · the ray reached the neighbour and it is empty.</text><text x="250.0" y="138.0" class="sm mu" text-anchor="start" xml:space="preserve"></text><text x="250.0" y="156.0" class="sm" text-anchor="start" xml:space="preserve">Numbers on the board = the layer where the ray arrives.</text><text x="250.0" y="174.0" class="sm mu" text-anchor="start" xml:space="preserve">The knight on g5 stops it: h6 is never reached.</text><text x="250.0" y="192.0" class="sm mu" text-anchor="start" xml:space="preserve"></text><text x="250.0" y="210.0" class="sm" text-anchor="start" xml:space="preserve">7 layers cross the board. AlphaZero has about 39.</text></svg></div></section>
+<section class="gs"><div class="txt"><span class="num">06 · Policy head</span><h2>A score for every possible move</h2><p>The policy head turns the tower's output into 73 sheets. A move is a starting square plus one sheet that says which way and how far it goes, so there are 4,672 slots. Illegal slots are thrown away and softmax turns the rest into probabilities that add up to 100%.</p><p class="rule"><b>How it's used.</b> The policy is not the final choice. It tells the search which moves deserve a closer look. It's trained to match how often the search actually visited each move.</p></div><div class="fig"><svg viewBox="0 0 680 280" role="img" aria-label="The policy head scores 4,672 move slots, masks the illegal ones, and turns the rest into probabilities with softmax." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><text x="16.0" y="26.0" class="h" text-anchor="start" >73 sheets per starting square</text><rect x="16.0" y="38.0" width="489.0" height="30.0" rx="4" class="f-ac" /><text x="22.0" y="58.0" class="sm on-ac" text-anchor="start" >56 slides · 8 directions × 1–7 squares</text><rect x="507.0" y="38.0" width="68.1" height="30.0" rx="4" class="f-w" /><text x="513.0" y="58.0" class="sm on-ac" text-anchor="start" >8 knight</text><rect x="577.1" y="38.0" width="76.9" height="30.0" rx="4" class="f-b" /><text x="583.1" y="58.0" class="sm on-ac" text-anchor="start" >9 promo</text><text x="16.0" y="96.0" class="sm" text-anchor="start" >× 64 starting squares = 4,672 slots</text><rect x="16.0" y="118.0" width="170.0" height="52.0" rx="8" class="f-bg" /><text x="101.0" y="141.0" class="h" text-anchor="middle" >4,672 raw scores</text><text x="101.0" y="158.0" class="sm mu" text-anchor="middle" >one per slot</text><rect x="226.0" y="118.0" width="170.0" height="52.0" rx="8" class="f-bg" /><text x="311.0" y="141.0" class="h" text-anchor="middle" >mask illegal moves</text><text x="311.0" y="158.0" class="sm mu" text-anchor="middle" >≈ 20–40 remain</text><rect x="436.0" y="118.0" width="120.0" height="52.0" rx="8" class="f-ac" /><text x="496.0" y="141.0" class="h on-ac" text-anchor="middle" >softmax</text><text x="496.0" y="158.0" class="sm on-ac" text-anchor="middle" >scores → %</text><line x1="186" y1="144" x2="224" y2="144" class="s-mu" stroke-width="1.6" marker-end="url(#ah6)"/><line x1="396" y1="144" x2="434" y2="144" class="s-mu" stroke-width="1.6" marker-end="url(#ah6)"/><text x="16.0" y="200.0" class="sm mu" text-anchor="start" >example</text><text x="16.0" y="222.0" class="sm" text-anchor="start" >e4</text><text x="52.0" y="222.0" class="sm mu" text-anchor="start" >logit +2.0</text><rect x="150.0" y="210.0" width="281.4" height="15.0" rx="3" class="f-ac" /><text x="439.4" y="222.0" class="sm" text-anchor="start" >67%</text><text x="16.0" y="244.0" class="sm" text-anchor="start" >d4</text><text x="52.0" y="244.0" class="sm mu" text-anchor="start" >logit +1.2</text><rect x="150.0" y="232.0" width="126.0" height="15.0" rx="3" class="f-ac" /><text x="284.0" y="244.0" class="sm" text-anchor="start" >30%</text><text x="16.0" y="266.0" class="sm" text-anchor="start" >a3</text><text x="52.0" y="266.0" class="sm mu" text-anchor="start" >logit -1.0</text><rect x="150.0" y="254.0" width="12.6" height="15.0" rx="3" class="f-ac" /><text x="170.6" y="266.0" class="sm" text-anchor="start" >3%</text></svg></div></section>
+<section class="gs"><div class="txt"><span class="num">07 · Value head</span><h2>One number: who is winning?</h2><p>The value head shrinks the tower's output to a single sheet with a 1×1 convolution, feeds those 64 numbers into a 256-unit fully connected layer, and squashes the result with tanh into the range −1 to +1, from the point of view of the side to move.</p><p class="rule"><b>How it's trained.</b> Every position of a finished self-play game is labelled with the final result, and the value head learns to predict it. This replaced the random playouts older programs used.</p></div><div class="fig"><svg viewBox="0 0 680 262" role="img" aria-label="The value head: a 1 by 1 convolution, a 256-unit fully connected layer, and tanh, giving one number from −1 to +1." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><rect x="12.0" y="20.0" width="98.0" height="50.0" rx="8" class="f-bg" /><text x="61.0" y="42.0" class="h" text-anchor="middle" >8×8×256</text><text x="61.0" y="59.0" class="sm mu" text-anchor="middle" >tower output</text><line x1="110" y1="45" x2="122" y2="45" class="s-mu" stroke-width="1.6" marker-end="url(#ah7)"/><rect x="122.0" y="20.0" width="98.0" height="50.0" rx="8" class="f-bg" /><text x="171.0" y="42.0" class="h" text-anchor="middle" >1×1 conv</text><text x="171.0" y="59.0" class="sm mu" text-anchor="middle" >1 filter</text><line x1="220" y1="45" x2="232" y2="45" class="s-mu" stroke-width="1.6" marker-end="url(#ah7)"/><rect x="232.0" y="20.0" width="98.0" height="50.0" rx="8" class="f-bg" /><text x="281.0" y="42.0" class="h" text-anchor="middle" >64</text><text x="281.0" y="59.0" class="sm mu" text-anchor="middle" >numbers</text><line x1="330" y1="45" x2="342" y2="45" class="s-mu" stroke-width="1.6" marker-end="url(#ah7)"/><rect x="342.0" y="20.0" width="98.0" height="50.0" rx="8" class="f-bg" /><text x="391.0" y="42.0" class="h" text-anchor="middle" >256 units</text><text x="391.0" y="59.0" class="sm mu" text-anchor="middle" >fully connected</text><line x1="440" y1="45" x2="452" y2="45" class="s-mu" stroke-width="1.6" marker-end="url(#ah7)"/><rect x="452.0" y="20.0" width="98.0" height="50.0" rx="8" class="f-bg" /><text x="501.0" y="42.0" class="h" text-anchor="middle" >1</text><text x="501.0" y="59.0" class="sm mu" text-anchor="middle" >number</text><line x1="550" y1="45" x2="562" y2="45" class="s-mu" stroke-width="1.6" marker-end="url(#ah7)"/><rect x="562.0" y="20.0" width="98.0" height="50.0" rx="8" class="f-ac" /><text x="611.0" y="42.0" class="h on-ac" text-anchor="middle" >tanh</text><text x="611.0" y="59.0" class="sm on-ac" text-anchor="middle" >squash</text><text x="16.0" y="104.0" class="sm mu" text-anchor="start" >1×1 conv: mixes the 256 features on each square, no neighbours</text><text x="16.0" y="122.0" class="sm mu" text-anchor="start" >fully connected: every unit sees all 64 squares at once</text><line x1="60" y1="198.0" x2="320" y2="198.0" class="s-gr"/><line x1="190.0" y1="150" x2="190.0" y2="246" class="s-gr"/><polyline points="60.0,245.8 64.3,245.7 68.7,245.6 73.0,245.6 77.3,245.5 81.7,245.4 86.0,245.2 90.3,245.0 94.7,244.8 99.0,244.6 103.3,244.3 107.7,243.9 112.0,243.4 116.3,242.9 120.7,242.2 125.0,241.4 129.3,240.5 133.7,239.4 138.0,238.0 142.3,236.4 146.7,234.6 151.0,232.4 155.3,229.9 159.7,227.0 164.0,223.8 168.3,220.2 172.7,216.2 177.0,212.0 181.3,207.5 185.7,202.8 190.0,198.0 194.3,193.2 198.7,188.5 203.0,184.0 207.3,179.8 211.7,175.8 216.0,172.2 220.3,169.0 224.7,166.1 229.0,163.6 233.3,161.4 237.7,159.6 242.0,158.0 246.3,156.6 250.7,155.5 255.0,154.6 259.3,153.8 263.7,153.1 268.0,152.6 272.3,152.1 276.7,151.7 281.0,151.4 285.3,151.2 289.7,151.0 294.0,150.8 298.3,150.6 302.7,150.5 307.0,150.4 311.3,150.4 315.7,150.3 320.0,150.2" class="s-ac f-none" stroke-width="2.5"/><text x="52.0" y="158.0" class="sm mu" text-anchor="end" >+1</text><text x="52.0" y="246.0" class="sm mu" text-anchor="end" >−1</text><text x="320.0" y="214.0" class="sm mu" text-anchor="end" >raw score</text><text x="360.0" y="168.0" class="sm" text-anchor="start" >+1</text><text x="410.0" y="168.0" class="sm mu" text-anchor="start" >side to move wins</text><text x="360.0" y="190.0" class="sm" text-anchor="start" >0</text><text x="410.0" y="190.0" class="sm mu" text-anchor="start" >draw</text><text x="360.0" y="212.0" class="sm" text-anchor="start" >−1</text><text x="410.0" y="212.0" class="sm mu" text-anchor="start" >side to move loses</text><text x="360.0" y="234.0" class="sm" text-anchor="start" >+0.2</text><text x="410.0" y="234.0" class="sm mu" text-anchor="start" >expected score ≈ 60%</text></svg></div></section>
+<section class="gs"><div class="txt"><span class="num">08 · Tree search</span><h2>Thinking ahead with the network&#x27;s help</h2><p>Monte Carlo tree search grows a tree of possible continuations. It follows the most promising branch, asks the network about the new position, and passes the value back up. Q is how good a move has proved so far; U favours moves the policy likes that haven't been tried much.</p><p class="rule"><b>Selective, not exhaustive.</b> AlphaZero examined tens of thousands of positions per second, about a thousand times fewer than Stockfish, and still played stronger chess.</p></div><div class="fig"><svg viewBox="0 0 680 262" role="img" aria-label="Monte Carlo tree search: select by Q plus U, expand and evaluate with the network, back up the value, repeat 800 times, then play the most visited move." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><rect x="30.0" y="24.0" width="200.0" height="56.0" rx="8" class="f-bg" /><text x="130.0" y="49.0" class="h" text-anchor="middle" >1  Select</text><text x="130.0" y="66.0" class="sm mu" text-anchor="middle" >follow highest Q + U</text><rect x="450.0" y="24.0" width="200.0" height="56.0" rx="8" class="f-ac" /><text x="550.0" y="49.0" class="h on-ac" text-anchor="middle" >2  Expand &amp; evaluate</text><text x="550.0" y="66.0" class="sm on-ac" text-anchor="middle" >ask the network: p and v</text><rect x="450.0" y="160.0" width="200.0" height="56.0" rx="8" class="f-bg" /><text x="550.0" y="185.0" class="h" text-anchor="middle" >3  Back up</text><text x="550.0" y="202.0" class="sm mu" text-anchor="middle" >add v to every node above</text><rect x="30.0" y="160.0" width="200.0" height="56.0" rx="8" class="f-bg" /><text x="130.0" y="185.0" class="h" text-anchor="middle" >4  Repeat</text><text x="130.0" y="202.0" class="sm mu" text-anchor="middle" >800 times per move</text><line x1="230" y1="52" x2="448" y2="52" class="s-mu" stroke-width="1.6" marker-end="url(#ah8)"/><line x1="550" y1="80" x2="550" y2="158" class="s-mu" stroke-width="1.6" marker-end="url(#ah8)"/><line x1="450" y1="188" x2="232" y2="188" class="s-mu" stroke-width="1.6" marker-end="url(#ah8)"/><line x1="130" y1="160" x2="130" y2="82" class="s-mu" stroke-width="1.6" marker-end="url(#ah8)"/><line x1="340" y1="96" x2="300" y2="132" class="s-gr" stroke-width="1.5"/><line x1="340" y1="96" x2="380" y2="132" class="s-gr" stroke-width="1.5"/><line x1="380" y1="132" x2="360" y2="168" class="s-gr" stroke-width="1.5"/><line x1="380" y1="132" x2="400" y2="168" class="s-gr" stroke-width="1.5"/><circle cx="340" cy="96" r="8" class="f-ac"/><circle cx="300" cy="132" r="8" class="f-gr"/><circle cx="380" cy="132" r="8" class="f-ac"/><circle cx="360" cy="168" r="8" class="f-gr"/><circle cx="400" cy="168" r="8" class="f-ac"/><text x="340.0" y="250.0" class="sm" text-anchor="middle" >Then play the move visited most.  U ∝ P · √N ÷ (1 + n)</text></svg></div></section>
+<section class="gs wide"><div class="txt"><span class="num">09 · Training</span><h2>Learning entirely from self-play</h2><p>Training plays games of the newest network against itself, stores each position with the search's visit percentages and the final result, and nudges every weight to reduce the combined loss.</p><div class="stats"><div><b>44M</b><span>self-play games</span></div><div><b>700k</b><span>training steps</span></div><div><b>4,096</b><span>positions per batch</span></div><div><b>~9 h</b><span>to pass Stockfish</span></div></div></div><div class="fig"><svg viewBox="0 0 680 218" role="img" aria-label="The training loop: self-play games produce positions with search visit counts and results, which drive the loss that updates the weights." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><rect x="12.0" y="30.0" width="150.0" height="56.0" rx="8" class="f-bg" /><text x="87.0" y="55.0" class="h" text-anchor="middle" >Self-play game</text><text x="87.0" y="72.0" class="sm mu" text-anchor="middle" >search picks each move</text><rect x="190.0" y="30.0" width="190.0" height="56.0" rx="8" class="f-bg" /><text x="285.0" y="55.0" class="h" text-anchor="middle" >Store every position</text><text x="285.0" y="72.0" class="sm mu" text-anchor="middle" >board · visit % π · result z</text><rect x="408.0" y="30.0" width="150.0" height="56.0" rx="8" class="f-ac" /><text x="483.0" y="63.0" class="h on-ac" text-anchor="middle" >Compute loss</text><rect x="586.0" y="30.0" width="82.0" height="56.0" rx="8" class="f-bg" /><text x="627.0" y="55.0" class="h" text-anchor="middle" >New</text><text x="627.0" y="72.0" class="sm mu" text-anchor="middle" >weights</text><line x1="162" y1="58" x2="188" y2="58" class="s-mu" stroke-width="1.6" marker-end="url(#ah9)"/><line x1="380" y1="58" x2="406" y2="58" class="s-mu" stroke-width="1.6" marker-end="url(#ah9)"/><line x1="558" y1="58" x2="584" y2="58" class="s-mu" stroke-width="1.6" marker-end="url(#ah9)"/><path d="M 627 86 C 627 140, 87 140, 87 88" class="s-mu f-none" stroke-width="1.6" marker-end="url(#ah9)"/><text x="340.0" y="152.0" class="sm mu" text-anchor="middle" >the improved network plays the next games</text><text x="340.0" y="186.0" class="h" text-anchor="middle" >loss = (z − v)²  −  π · log p  +  c‖θ‖²</text><text x="170.0" y="206.0" class="sm mu" text-anchor="middle" >value error</text><text x="340.0" y="206.0" class="sm mu" text-anchor="middle" >policy error</text><text x="500.0" y="206.0" class="sm mu" text-anchor="middle" >keep weights small</text></svg></div></section>
+<section class="gs"><div class="txt"><span class="num">10 · Inside a trained network</span><h2>What real filters look like</h2><p>AlphaZero's weights were never released, but Maia, an open network with the same design, lets us look inside. Some first-layer filters are crisp: one fires for rooks and queens together, another for bishops and queens with weight on the diagonal neighbours. Most are blurry blends with no human name.</p><p class="rule"><b>Nobody told it</b> that queens move like rooks and bishops. Training discovered it. Research on AlphaZero itself (McGrath et al., <i>PNAS</i>, 2022) found concepts like material, mobility and king safety encoded in its layers.</p></div><div class="fig"><svg viewBox="0 0 680 210" role="img" aria-label="Two real learned first-layer filters from the open Maia network: one responds to rooks and queens, one to bishops and queens with weight on the diagonal neighbours." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><text x="16.0" y="24.0" class="h" text-anchor="start" >Filter 2 · “a rook-mover is here”</text><text x="16.0" y="46.0" class="sm mu" text-anchor="start" >their rook</text><rect x="16.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="34.0" y="76.0" class="sm" text-anchor="middle" >+0.00</text><rect x="54.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="72.0" y="76.0" class="sm" text-anchor="middle" >+0.02</text><rect x="92.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="110.0" y="76.0" class="sm" text-anchor="middle" >+0.00</text><rect x="16.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="16.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.32"/><text x="34.0" y="114.0" class="sm" text-anchor="middle" >+0.35</text><rect x="54.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="54.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="1.00"/><text x="72.0" y="114.0" class="sm on-ac" text-anchor="middle" >+1.55</text><rect x="92.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="110.0" y="114.0" class="sm" text-anchor="middle" >+0.00</text><rect x="16.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="34.0" y="152.0" class="sm" text-anchor="middle" >+0.02</text><rect x="54.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="54.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.12"/><text x="72.0" y="152.0" class="sm" text-anchor="middle" >+0.03</text><rect x="92.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="110.0" y="152.0" class="sm" text-anchor="middle" >+0.02</text><text x="150.0" y="46.0" class="sm mu" text-anchor="start" >their queen</text><rect x="150.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="168.0" y="76.0" class="sm" text-anchor="middle" >+0.01</text><rect x="188.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="188.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.12"/><text x="206.0" y="76.0" class="sm" text-anchor="middle" >+0.03</text><rect x="226.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="244.0" y="76.0" class="sm" text-anchor="middle" >+0.01</text><rect x="150.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="150.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.32"/><text x="168.0" y="114.0" class="sm" text-anchor="middle" >+0.35</text><rect x="188.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="188.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.89"/><text x="206.0" y="114.0" class="sm on-ac" text-anchor="middle" >+0.98</text><rect x="226.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="244.0" y="114.0" class="sm" text-anchor="middle" >-0.02</text><rect x="150.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="150.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.12"/><text x="168.0" y="152.0" class="sm" text-anchor="middle" >+0.03</text><rect x="188.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="188.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.12"/><text x="206.0" y="152.0" class="sm" text-anchor="middle" >+0.03</text><rect x="226.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="226.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.12"/><text x="244.0" y="152.0" class="sm" text-anchor="middle" >+0.03</text><text x="356.0" y="24.0" class="h" text-anchor="start" >Filter 29 · “a diagonal-mover is near”</text><text x="356.0" y="46.0" class="sm mu" text-anchor="start" >their bishop</text><rect x="356.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="356.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.28"/><text x="374.0" y="76.0" class="sm" text-anchor="middle" >+0.31</text><rect x="394.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="412.0" y="76.0" class="sm" text-anchor="middle" >+0.01</text><rect x="432.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="432.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.25"/><text x="450.0" y="76.0" class="sm" text-anchor="middle" >+0.28</text><rect x="356.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="356.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.12"/><text x="374.0" y="114.0" class="sm" text-anchor="middle" >+0.03</text><rect x="394.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="394.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.95"/><text x="412.0" y="114.0" class="sm on-ac" text-anchor="middle" >+1.05</text><rect x="432.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="450.0" y="114.0" class="sm" text-anchor="middle" >+0.01</text><rect x="356.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="356.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.12"/><text x="374.0" y="152.0" class="sm" text-anchor="middle" >+0.13</text><rect x="394.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="412.0" y="152.0" class="sm" text-anchor="middle" >-0.01</text><rect x="432.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="432.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.29"/><text x="450.0" y="152.0" class="sm" text-anchor="middle" >+0.32</text><text x="490.0" y="46.0" class="sm mu" text-anchor="start" >their queen</text><rect x="490.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="490.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.20"/><text x="508.0" y="76.0" class="sm" text-anchor="middle" >+0.22</text><rect x="528.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="528.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.14"/><text x="546.0" y="76.0" class="sm" text-anchor="middle" >+0.15</text><rect x="566.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="566.0" y="54.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.29"/><text x="584.0" y="76.0" class="sm" text-anchor="middle" >+0.32</text><rect x="490.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><text x="508.0" y="114.0" class="sm" text-anchor="middle" >+0.01</text><rect x="528.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="528.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.57"/><text x="546.0" y="114.0" class="sm on-ac" text-anchor="middle" >+0.63</text><rect x="566.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="566.0" y="92.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.12"/><text x="584.0" y="114.0" class="sm" text-anchor="middle" >+0.04</text><rect x="490.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="490.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.12"/><text x="508.0" y="152.0" class="sm" text-anchor="middle" >+0.07</text><rect x="528.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="528.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.12"/><text x="546.0" y="152.0" class="sm" text-anchor="middle" >+0.04</text><rect x="566.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-bg" /><rect x="566.0" y="130.0" width="36.0" height="36.0" rx="3" class="f-ac" opacity="0.17"/><text x="584.0" y="152.0" class="sm" text-anchor="middle" >+0.19</text><text x="16.0" y="196.0" class="sm mu" text-anchor="start" >top row = toward the opponent · rook and queen share a pattern; bishop and queen share another</text></svg></div></section>
+<section class="gs wide"><div class="txt"><span class="num">11 · The result</span><h2>Superhuman chess in a day of training</h2><p>In the final match reported in <i>Science</i>, AlphaZero played 1,000 games against Stockfish 8, then one of the strongest engines in the world.</p></div><div class="fig"><svg viewBox="0 0 680 108" role="img" aria-label="AlphaZero&#x27;s 1,000-game match against Stockfish 8: 155 wins, 839 draws, 6 losses." xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-mu"/></marker></defs><text x="16.0" y="24.0" class="h" text-anchor="start" >1,000-game match vs Stockfish 8 (Science, 2018)</text><rect x="16.0" y="40.0" width="99.2" height="34.0" rx="0" class="f-ac" /><rect x="115.2" y="40.0" width="537.0" height="34.0" rx="0" class="f-gr" /><rect x="652.2" y="40.0" width="3.8" height="34.0" rx="0" class="f-b" /><text x="20.0" y="62.0" class="h on-ac" text-anchor="start" >155 wins</text><text x="125.2" y="62.0" class="h" text-anchor="start" >839 draws</text><text x="656.0" y="96.0" class="sm" text-anchor="end" >6 losses</text></svg></div></section>
+<p class="gfoot">Sources: Silver et al., “A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play,” <i>Science</i> 362 (2018); McGrath et al., “Acquisition of chess knowledge in AlphaZero,” <i>PNAS</i> 119 (2022); real filter weights from the open <a href="https://github.com/CSSLab/maia-chess" rel="noopener">Maia Chess</a> network (maia-1900), which uses the Leela Chess Zero architecture. The 3D explorer runs AlphaZero-shaped layers with random weights.</p>
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script>
+(function(){
+"use strict";
+const $=s=>document.querySelector(s);
+const reduced=matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* ================= Views (explorer / guide) ================= */
+let explorerStarted=false;
+function route(){
+  const g=location.hash==="#guide";
+  $("#guide").hidden=!g;$("#explorer").hidden=g;
+  if(g){window.scrollTo(0,0);}else if(!explorerStarted){explorerStarted=true;startExplorer();}
+  else if(window.__azResize)window.__azResize();
+}
+window.addEventListener("hashchange",route);
+route();
+
+function startExplorer(){
+if(typeof THREE==="undefined"||typeof Chess==="undefined"){const d=document.createElement("div");d.className="glerr";d.textContent="The 3D libraries didn't load. Check your connection and reload the page.";$("#stage").appendChild(d);return;}
+
+/* ================= Game ================= */
+const OPERA="e2e4 e7e5 g1f3 d7d6 d2d4 c8g4 d4e5 g4f3 d1f3 d6e5 f1c4 g8f6 f3b3 d8e7 b1c3 c7c6 c1g5 b7b5 c3b5 c6b5 c4b5 b8d7 e1c1 a8d8 d1d7 d8d7 h1d1 e7e6 b5d7 f6d7 b3b8 d7b8 d1d8".split(" ");
+const G={fens:[],sans:[],moves:[],pos:[],reps:[],legal:[]};
+function parseFEN(f){
+  const [pl,side,cas,ep,half,full]=f.split(" ");
+  const b=[...Array(8)].map(()=>Array(8).fill(null));
+  pl.split("/").forEach((row,i)=>{let c=0;for(const ch of row){if(/\d/.test(ch))c+=+ch;else{b[7-i][c]=ch;c++;}}});
+  return {b,side,cas,ep,half:+half,full:+full};
+}
+function rebuildDerived(from){
+  G.pos.length=G.reps.length=G.legal.length=from;
+  for(let i=from;i<G.fens.length;i++){
+    G.pos[i]=parseFEN(G.fens[i]);
+    const key=G.fens[i].split(" ").slice(0,4).join(" ");let n=0;for(let j=0;j<i;j++)if(G.fens[j].split(" ").slice(0,4).join(" ")===key)n++;G.reps[i]=n;
+    const ch=new Chess(G.fens[i]);
+    G.legal[i]={moves:ch.moves({verbose:true}),mate:ch.in_checkmate(),check:ch.in_check(),draw:ch.in_draw()||ch.in_stalemate()};
+  }
+}
+function loadLine(ucis){
+  const ch=new Chess();G.fens=[ch.fen()];G.sans=["Start"];G.moves=[null];
+  for(const u of ucis){const m=ch.move({from:u.slice(0,2),to:u.slice(2,4),promotion:u[4]||"q"});if(!m)break;G.fens.push(ch.fen());G.sans.push(m.san);G.moves.push(m);}
+  rebuildDerived(0);
+}
+function pushMove(m){
+  G.fens.length=G.sans.length=G.moves.length=S.pos+1;
+  const ch=new Chess(G.fens[S.pos]);const mv=ch.move(m);if(!mv)return false;
+  G.fens.push(ch.fen());G.sans.push(mv.san);G.moves.push(mv);rebuildDerived(S.pos+1);return true;
+}
+const moveLabel=i=>{if(i===0)return "Start";const n=Math.ceil(i/2);return (i%2?n+". ":n+"… ")+G.sans[i];};
+const PIECES="PNBRQKpnbrqk";
+const PNAMES=["pawns","knights","bishops","rooks","queens","king"];
+const FILES="abcdefgh";
+const sqName=(r,c)=>FILES[c]+(r+1);
+const sqRC=s=>({r:+s[1]-1,c:FILES.indexOf(s[0])});
+const pieceName=ch=>({p:"pawn",n:"knight",b:"bishop",r:"rook",q:"queen",k:"king"})[ch.toLowerCase()];
+
+/* ================= State ================= */
+const S={pos:0,stage:"play",plane:0,variant:"B",cur:{r:4,c:1},revealed:64,sweeping:false,
+  layer:2,chan:0,rf:{r:3,c:4},pol:56,from:{r:0,c:1},sel:null,playing:false,follow:false};
+
+/* ================= Input tensor ================= */
+function planeName(i){
+  if(i<112){const t=Math.floor(i/14),j=i%14;const when=t===0?"Now":"T−"+t;
+    if(j<12)return when+" · "+(j<6?"White ":"Black ")+PNAMES[j%6];
+    return when+" · "+(j===12?"position seen before":"position seen twice before");}
+  return ["Side to move (1 = White)","Total move count","White may castle kingside","White may castle queenside","Black may castle kingside","Black may castle queenside","Moves since capture or pawn move"][i-112];
+}
+function buildInput(p){
+  const X=new Float32Array(119*64);
+  for(let t=0;t<8;t++){const q=p-t;if(q<0)continue;const P=G.pos[q];
+    for(let r=0;r<8;r++)for(let c=0;c<8;c++){const ch=P.b[r][c];if(ch)X[(t*14+PIECES.indexOf(ch))*64+r*8+c]=1;}
+    if(G.reps[q]>=1)for(let s=0;s<64;s++)X[(t*14+12)*64+s]=1;
+    if(G.reps[q]>=2)for(let s=0;s<64;s++)X[(t*14+13)*64+s]=1;}
+  const P=G.pos[p];
+  const cv=[P.side==="w"?1:0,P.full,P.cas.includes("K")?1:0,P.cas.includes("Q")?1:0,P.cas.includes("k")?1:0,P.cas.includes("q")?1:0,P.half];
+  cv.forEach((v,k)=>{for(let s=0;s<64;s++)X[(112+k)*64+s]=v;});
+  return X;
+}
+
+/* ================= Random-weight network (AlphaZero shapes, untrained) ================= */
+function rng(seed){return function(){seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const R=rng(20171205);
+const gauss=()=>{let u=0,v=0;while(!u)u=R();while(!v)v=R();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);};
+function weights(co,ci){const W=new Float32Array(co*ci*9),s=Math.sqrt(2/(ci*9));for(let i=0;i<W.length;i++)W[i]=gauss()*s;return W;}
+const W1=weights(256,119),TC=32;
+const TW=[...Array(19)].map(()=>[weights(TC,TC),weights(TC,TC)]);
+const VW=new Float32Array(TC).map(()=>gauss()/Math.sqrt(TC));
+function conv(X,ci,W,co){
+  const Y=new Float32Array(co*64);
+  for(let i=0;i<ci;i++){const base=i*64;let any=false;for(let s=0;s<64;s++)if(X[base+s]!==0){any=true;break;}if(!any)continue;
+    for(let o=0;o<co;o++){const wb=(o*ci+i)*9,yb=o*64;
+      for(let r=0;r<8;r++)for(let c=0;c<8;c++){let acc=0;
+        for(let dr=-1;dr<=1;dr++){const rr=r+dr;if(rr<0||rr>7)continue;
+          for(let dc=-1;dc<=1;dc++){const cc=c+dc;if(cc<0||cc>7)continue;acc+=W[wb+(dr+1)*3+dc+1]*X[base+rr*8+cc];}}
+        Y[yb+r*8+c]+=acc;}}}
+  return Y;
+}
+function norm(Y,co){for(let o=0;o<co;o++){let m=0,v=0;for(let s=0;s<64;s++)m+=Y[o*64+s];m/=64;for(let s=0;s<64;s++){const d=Y[o*64+s]-m;v+=d*d;}const sd=Math.sqrt(v/64)+1e-5;for(let s=0;s<64;s++)Y[o*64+s]=(Y[o*64+s]-m)/sd;}return Y;}
+const relu=Y=>{for(let i=0;i<Y.length;i++)if(Y[i]<0)Y[i]=0;return Y;};
+let NET=null;
+function runNet(){
+  const X=buildInput(S.pos);
+  const Xs=X.slice();for(let s=0;s<64;s++){Xs[113*64+s]/=50;Xs[118*64+s]/=50;}
+  const c1=relu(norm(conv(Xs,119,W1,256),256));
+  const maps=[c1.slice(0,TC*64)];let x=maps[0];
+  for(let b=0;b<19;b++){const y=relu(norm(conv(x,TC,TW[b][0],TC),TC));const z=norm(conv(y,TC,TW[b][1],TC),TC);
+    const n=new Float32Array(TC*64);for(let i=0;i<n.length;i++)n[i]=Math.max(0,x[i]+z[i]);maps.push(n);x=n;}
+  const vp=new Float32Array(64);for(let s=0;s<64;s++){let a=0;for(let o=0;o<TC;o++)a+=VW[o]*x[o*64+s];vp[s]=Math.max(0,a);}
+  NET={X,c1,maps,vp};
+}
+
+/* ================= Filter ================= */
+function filterAt(r,c){
+  const B=G.pos[S.pos].b,A=S.variant==="A";
+  const pawn=A?"P":"p",rr=A?r-1:r+1,terms=[];let sum=-1;
+  for(const dc of[-1,1]){const cc=c+dc;if(rr<0||rr>7||cc<0||cc>7){terms.push({sq:null});continue;}
+    const hit=B[rr][cc]===pawn;if(hit)sum+=0.5;terms.push({sq:sqName(rr,cc),hit});}
+  const ch=B[r][c];const tgt=!!ch&&(A?ch===ch.toLowerCase():ch===ch.toUpperCase());if(tgt)sum+=1;
+  return {terms,tgt,ch,sum,out:Math.max(0,sum)};
+}
+const SWEEP=[];for(let r=7;r>=0;r--)for(let c=0;c<8;c++)SWEEP.push({r,c});
+
+/* ================= Policy encoding ================= */
+const DIRS=[[1,0,"north"],[1,1,"north-east"],[0,1,"east"],[-1,1,"south-east"],[-1,0,"south"],[-1,-1,"south-west"],[0,-1,"west"],[1,-1,"north-west"]];
+const KN=[[2,1],[1,2],[-1,2],[-2,1],[-2,-1],[-1,-2],[1,-2],[2,-1]];
+function polInfo(k,sideW=true){
+  if(k<56){const d=Math.floor(k/7),n=k%7+1;return{name:"Slide "+DIRS[d][2]+", "+n+" square"+(n>1?"s":""),dr:DIRS[d][0]*n,dc:DIRS[d][1]*n};}
+  if(k<64){const [dr,dc]=KN[k-56];return{name:"Knight jump ("+(dr>0?"+":"")+dr+" rank, "+(dc>0?"+":"")+dc+" file)",dr,dc};}
+  const j=k-64,d=Math.floor(j/3),p=j%3;return{name:"Promote to "+["knight","bishop","rook"][p]+", "+["toward the a-file","straight ahead","toward the h-file"][d],dr:sideW?1:-1,dc:d-1};
+}
+function planeOf(m){
+  const a=sqRC(m.from),b=sqRC(m.to),dr=b.r-a.r,dc=b.c-a.c;
+  if(m.promotion&&m.promotion!=="q")return 64+(dc+1)*3+["n","b","r"].indexOf(m.promotion);
+  const adr=Math.abs(dr),adc=Math.abs(dc);
+  if((adr===1&&adc===2)||(adr===2&&adc===1))return 56+KN.findIndex(k=>k[0]===dr&&k[1]===dc);
+  const d=DIRS.findIndex(x=>x[0]===Math.sign(dr)&&x[1]===Math.sign(dc));return d*7+Math.max(adr,adc)-1;
+}
+
+/* ================= Value stand-in ================= */
+const MAT={p:1,n:3,b:3,r:5,q:9,k:0};
+function valueOf(i){
+  const L=G.legal[i],P=G.pos[i];
+  if(L.mate)return{v:-1,why:"checkmate"};if(L.draw)return{v:0,why:"draw"};
+  let w=0,b=0;for(let r=0;r<8;r++)for(let c=0;c<8;c++){const ch=P.b[r][c];if(!ch)continue;if(ch===ch.toUpperCase())w+=MAT[ch.toLowerCase()];else b+=MAT[ch];}
+  const d=P.side==="w"?w-b:b-w;return{v:Math.tanh(d/5),w,b,d,why:"material"};
+}
+
+/* ================= Colors ================= */
+const C={};
+function cssVar(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function readColors(){["bg","surface","fg","muted","grid","accent","white","black","const","sqLight","sqDark","pieceW","pieceB"].forEach(k=>C[k]=new THREE.Color(cssVar("--"+k)||"#888"));}
+const hex=c=>"#"+c.getHexString();
+
+/* ================= Three setup ================= */
+const canvas=$("#gl"),stageEl=$("#stage");
+let renderer;
+try{renderer=new THREE.WebGLRenderer({canvas,antialias:true,preserveDrawingBuffer:false});}catch(e){const d=document.createElement("div");d.className="glerr";d.textContent="This view needs WebGL, which isn't available in this browser. The guide still explains every stage.";stageEl.appendChild(d);return;}
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+readColors();
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(42,1,0.1,500);
+const controls=new THREE.OrbitControls(camera,canvas);
+controls.enableDamping=true;controls.dampingFactor=0.08;
+
+const dummy=new THREE.Object3D(),tmpC=new THREE.Color();
+function frameGeo(xs,y0=0){
+  const v=[];for(const x of xs){const a=[[y0,-4],[y0+8,-4],[y0+8,4],[y0,4]];for(let i=0;i<4;i++){const p=a[i],q=a[(i+1)%4];v.push(x,p[0],p[1],x,q[0],q[1]);}}
+  const g=new THREE.BufferGeometry();g.setAttribute("position",new THREE.Float32BufferAttribute(v,3));return g;}
+const GRIDLINES=[];
+function lineMat(color,op){return new THREE.LineBasicMaterial({color,transparent:true,opacity:op});}
+function gridLines(geo,op){const l=new THREE.LineSegments(geo,lineMat(C.grid,op));scene.add(l);GRIDLINES.push(l);return l;}
+function cellMesh(n,th,h=0.84){const m=new THREE.InstancedMesh(new THREE.BoxGeometry(th,h,h),new THREE.MeshBasicMaterial(),n);
+  for(let i=0;i<n;i++)m.setColorAt(i,C.fg);m.count=0;scene.add(m);return m;}
+function setCell(m,i,x,y,z,s,col){dummy.position.set(x,y,z);dummy.rotation.set(0,0,0);dummy.scale.set(1,s,s);dummy.updateMatrix();m.setMatrixAt(i,dummy.matrix);m.setColorAt(i,col);}
+function flush(m,n){m.count=n;m.instanceMatrix.needsUpdate=true;if(m.instanceColor)m.instanceColor.needsUpdate=true;}
+const cy=r=>r+0.5,cz=c=>c-3.5;
+const clamp01=x=>Math.max(0,Math.min(1,x));
+const easeIO=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
+const easeBack=t=>{const c1=1.9,c3=c1+1;return 1+c3*Math.pow(t-1,3)+c1*Math.pow(t-1,2);};
+const easeElastic=t=>t<=0?0:t>=1?1:Math.pow(2,-9*t)*Math.sin((t*10-0.75)*(2*Math.PI)/3)+1;
+
+/* Labels */
+const LABELS=[];
+function label(text,pos,size=0.7,muted=false){
+  const sp=new THREE.Sprite(new THREE.SpriteMaterial({transparent:true,depthTest:false}));
+  sp.position.copy(pos);sp.renderOrder=20;scene.add(sp);const L={sp,text,size,muted};LABELS.push(L);drawLabel(L);return L;}
+function drawLabel(L){
+  const cv=document.createElement("canvas"),x=cv.getContext("2d"),fs=64;
+  const font=(L.muted?"500 ":"700 ")+fs+"px "+(L.muted?'"JetBrains Mono", monospace':'"Familjen Grotesk", Arial, sans-serif');
+  x.font=font;const w=Math.ceil(x.measureText(L.text).width)+24;cv.width=w;cv.height=fs*1.4;
+  x.font=font;x.fillStyle=hex(L.muted?C.muted:C.fg);x.textBaseline="middle";x.fillText(L.text,12,cv.height/2);
+  if(L.sp.material.map)L.sp.material.map.dispose();
+  const t=new THREE.CanvasTexture(cv);t.minFilter=THREE.LinearFilter;L.sp.material.map=t;L.sp.material.needsUpdate=true;
+  L.sp.scale.set(L.size*w/cv.height,L.size,1);
+}
+
+/* ================= Board ================= */
+const boardCv=document.createElement("canvas");boardCv.width=boardCv.height=512;
+const boardTex=new THREE.CanvasTexture(boardCv);
+const boardMesh=new THREE.Mesh(new THREE.PlaneGeometry(8,8),new THREE.MeshBasicMaterial({map:boardTex,side:THREE.DoubleSide}));
+boardMesh.geometry.rotateY(-Math.PI/2);boardMesh.position.set(0,4,0);scene.add(boardMesh);
+const boardBack=new THREE.Mesh(new THREE.BoxGeometry(0.12,8.3,8.3),new THREE.MeshBasicMaterial());boardBack.position.set(0.08,4,0);scene.add(boardBack);
+const GLYPH={k:"♚",q:"♛",r:"♜",b:"♝",n:"♞",p:"♟"};
+const Q=64;
+function drawPiece(x,ch,px,py,scale=1,alpha=1){
+  if(alpha<=0)return;const w=ch===ch.toUpperCase();
+  x.save();x.globalAlpha=alpha;x.translate(px,py);x.scale(scale,scale);
+  x.textAlign="center";x.textBaseline="middle";x.font="46px 'DejaVu Sans','Segoe UI Symbol','Noto Sans Symbols 2',serif";
+  const g=GLYPH[ch.toLowerCase()]+"︎";
+  x.lineWidth=3;x.strokeStyle=hex(w?C.pieceB:C.pieceW);x.strokeText(g,0,3);x.fillStyle=hex(w?C.pieceW:C.pieceB);x.fillText(g,0,3);x.restore();
+}
+function movingPieces(mv){
+  const a=sqRC(mv.from),b=sqRC(mv.to),ch=mv.color==="w"?mv.piece.toUpperCase():mv.piece;
+  const list=[{ch,a,b,promo:mv.promotion?(mv.color==="w"?mv.promotion.toUpperCase():mv.promotion):null}];
+  if(mv.flags.includes("k"))list.push({ch:mv.color==="w"?"R":"r",a:{r:a.r,c:7},b:{r:a.r,c:5}});
+  if(mv.flags.includes("q"))list.push({ch:mv.color==="w"?"R":"r",a:{r:a.r,c:0},b:{r:a.r,c:3}});
+  let cap=null;if(mv.flags.includes("e"))cap={r:a.r,c:b.c};else if(mv.captured)cap=b;
+  return {list,cap};
+}
+function drawBoard(k=1){
+  const x=boardCv.getContext("2d");
+  for(let r=0;r<8;r++)for(let c=0;c<8;c++){x.fillStyle=hex((r+c)%2?C.sqLight:C.sqDark);x.fillRect(c*Q,(7-r)*Q,Q,Q);}
+  const ov=overlay();
+  for(const o of ov.cells){x.fillStyle=o.color;x.globalAlpha=o.a;x.fillRect(o.c*Q,(7-o.r)*Q,Q,Q);x.globalAlpha=1;
+    if(o.ring){x.strokeStyle=o.color;x.lineWidth=5;x.strokeRect(o.c*Q+2.5,(7-o.r)*Q+2.5,Q-5,Q-5);}}
+  x.font="10px 'JetBrains Mono', monospace";x.fillStyle=hex(C.muted);x.textBaseline="alphabetic";x.textAlign="start";
+  for(let c=0;c<8;c++)x.fillText(FILES[c],c*Q+Q-10,Q*8-4);for(let r=0;r<8;r++)x.fillText(r+1,3,(7-r)*Q+12);
+  const animMv=ANIM&&k<1?G.moves[S.pos]:null;
+  if(animMv){
+    const P0=G.pos[S.pos-1].b,{list,cap}=movingPieces(animMv),skip=new Set(list.map(m=>m.a.r*8+m.a.c));if(cap)skip.add(cap.r*8+cap.c);
+    for(let r=0;r<8;r++)for(let c=0;c<8;c++){const ch=P0[r][c];if(ch&&!skip.has(r*8+c))drawPiece(x,ch,c*Q+Q/2,(7-r)*Q+Q/2);}
+    if(cap){const ch=P0[cap.r][cap.c];drawPiece(x,ch,cap.c*Q+Q/2,(7-cap.r)*Q+Q/2,1+0.4*k,1-easeIO(clamp01(k*1.6-0.4)));}
+    const e=easeIO(k);
+    for(const m of list){const px=(m.a.c+(m.b.c-m.a.c)*e)*Q+Q/2,py=(7-(m.a.r+(m.b.r-m.a.r)*e))*Q+Q/2-Math.sin(Math.PI*e)*18;
+      drawPiece(x,k>0.85&&m.promo?m.promo:m.ch,px,py,1+0.3*Math.sin(Math.PI*e));}
+  }else{const P=G.pos[S.pos].b;for(let r=0;r<8;r++)for(let c=0;c<8;c++){const ch=P[r][c];if(ch)drawPiece(x,ch,c*Q+Q/2,(7-r)*Q+Q/2);}}
+  for(const d of ov.dots){x.fillStyle=hex(C.accent);x.globalAlpha=0.85;x.beginPath();x.arc(d.c*Q+Q/2,(7-d.r)*Q+Q/2,d.cap?26:10,0,Math.PI*2);
+    if(d.cap){x.lineWidth=5;x.strokeStyle=hex(C.accent);x.stroke();}else x.fill();x.globalAlpha=1;}
+  if(ov.arrow){const a=ov.arrow,fx=a.c0*Q+Q/2,fy=(7-a.r0)*Q+Q/2,tx=a.c1*Q+Q/2,ty=(7-a.r1)*Q+Q/2,ang=Math.atan2(ty-fy,tx-fx);
+    x.strokeStyle=x.fillStyle=hex(a.color||C.accent);x.globalAlpha=0.9;x.lineWidth=9;x.lineCap="round";x.beginPath();x.moveTo(fx,fy);x.lineTo(tx-Math.cos(ang)*18,ty-Math.sin(ang)*18);x.stroke();
+    x.beginPath();x.moveTo(tx,ty);x.lineTo(tx-Math.cos(ang-0.5)*28,ty-Math.sin(ang-0.5)*28);x.lineTo(tx-Math.cos(ang+0.5)*28,ty-Math.sin(ang+0.5)*28);x.closePath();x.fill();x.globalAlpha=1;}
+  boardTex.needsUpdate=true;
+  const pb=$("#pboard").getContext("2d");pb.drawImage(boardCv,0,0);
+}
+function overlay(){
+  const A=hex(C.accent),W=hex(C.white),cells=[],dots=[];let arrow=null;
+  const last=G.moves[S.pos];
+  if(last&&(S.stage==="play"||S.stage==="value")){[last.from,last.to].forEach(s=>{const p=sqRC(s);cells.push({r:p.r,c:p.c,color:W,a:0.32});});}
+  if(S.stage==="play"&&S.sel){cells.push({r:S.sel.r,c:S.sel.c,color:A,a:0.4,ring:true});
+    for(const m of G.legal[S.pos].moves)if(m.from===sqName(S.sel.r,S.sel.c)){const p=sqRC(m.to);if(!dots.some(d=>d.r===p.r&&d.c===p.c))dots.push({r:p.r,c:p.c,cap:!!m.captured});}}
+  if(S.stage==="input"&&S.plane<112&&!ANIM){for(let s=0;s<64;s++)if(NET.X[S.plane*64+s])cells.push({r:s>>3,c:s&7,color:A,a:0.35,ring:true});}
+  if(S.stage==="filter"){const {r,c}=S.cur;for(let dr=-1;dr<=1;dr++)for(let dc=-1;dc<=1;dc++){const rr=r+dr,cc=c+dc;if(rr<0||rr>7||cc<0||cc>7)continue;cells.push({r:rr,c:cc,color:A,a:dr||dc?0.22:0.5,ring:!dr&&!dc});}}
+  if(S.stage==="tower"){const h=Math.floor(rfSize(S.layer)/2),{r,c}=S.rf;
+    for(let rr=Math.max(0,r-h);rr<=Math.min(7,r+h);rr++)for(let cc=Math.max(0,c-h);cc<=Math.min(7,c+h);cc++)cells.push({r:rr,c:cc,color:A,a:rr===r&&cc===c?0.55:0.22,ring:rr===r&&cc===c});}
+  if(S.stage==="policy"){const {r,c}=S.from,I=polInfo(S.pol,G.pos[S.pos].side==="w");cells.push({r,c,color:A,a:0.35,ring:true});
+    const r1=r+I.dr,c1=c+I.dc;if(r1>=0&&r1<8&&c1>=0&&c1<8)arrow={r0:r,c0:c,r1,c1};}
+  return {cells,dots,arrow};
+}
+
+/* ================= Scene layout ================= */
+const IX=i=>i<112?3+i*0.1+Math.floor(i/14)*0.3:3+111*0.1+7*0.3+0.5+(i-112)*0.25;
+const GROUPW=14*0.1+0.3;
+const FX=20.2,CX=o=>22+o*0.05,TX=b=>37.6+b*1.2,PX=k=>64+k*0.09,PY=6,VY=-6;
+
+/* Input stack */
+const inputMesh=cellMesh(119*64,0.07);
+const inputMap=new Int16Array(119*64);
+gridLines(frameGeo([...Array(119)].map((_,i)=>IX(i))),0.45);
+const selFrame=new THREE.LineSegments(frameGeo([0]),lineMat(C.accent,1));scene.add(selFrame);
+let filtFrames=null;
+function inputColor(i){if(i<112){const t=Math.floor(i/14),j=i%14;return (j<6?C.white:j<12?C.black:C.muted).clone().lerp(C.bg,t*0.085);}return C.const;}
+function updateInput(shift=1){
+  const X=NET.X,e=easeBack(clamp01(shift)),slide=easeIO(clamp01(shift*1.4));let n=0;
+  for(let i=0;i<119;i++){
+    const col=inputColor(i),t=i<112?Math.floor(i/14):-1;
+    const x=t>=1?IX(i)-(1-slide)*GROUPW:IX(i);
+    const s=t===0||t===-1?Math.max(0,e):1;if(s<=0.01)continue;
+    for(let q=0;q<64;q++){if(!X[i*64+q])continue;setCell(inputMesh,n,x,cy(q>>3),cz(q&7),s,col);inputMap[n]=i;n++;}}
+  flush(inputMesh,n);
+}
+
+/* Filter output plane + window */
+const filtMesh=cellMesh(64,0.06);
+gridLines(frameGeo([FX]),0.9);
+const winSpan=IX(118)-IX(0)+0.4;
+const winBox=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(winSpan,3,3)),lineMat(C.accent,0.9));scene.add(winBox);
+const outCursor=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(0.25,1,1)),lineMat(C.accent,1));scene.add(outCursor);
+function updateFilter(pop=1){
+  let n=0;const s=easeBack(clamp01(pop));
+  for(let k=0;k<S.revealed;k++){const {r,c}=SWEEP[k],f=filterAt(r,c);if(f.out<=0)continue;
+    setCell(filtMesh,n++,FX,cy(r),cz(c),Math.max(0.01,(0.6+0.4*Math.min(1,f.out))*s),C.accent);}
+  flush(filtMesh,n);
+  winBox.position.set((IX(0)+IX(118))/2,cy(S.cur.r),cz(S.cur.c));outCursor.position.set(FX,cy(S.cur.r),cz(S.cur.c));
+  const reads=S.variant==="A"?[0,6,7,8,9,10,11]:[6,0,1,2,3,4,5];
+  if(filtFrames){scene.remove(filtFrames);filtFrames.geometry.dispose();}
+  filtFrames=new THREE.LineSegments(frameGeo(reads.map(IX)),lineMat(C.accent,0.9));scene.add(filtFrames);
+  filtFrames.visible=S.stage==="filter";
+}
+
+/* Conv1 stack */
+const c1Mesh=cellMesh(256*64,0.03);
+gridLines(frameGeo([...Array(256)].map((_,o)=>CX(o)).filter((_,o)=>o%8===0||o===255)),0.4);
+const c1Box=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(CX(255)-CX(0)+0.2,8,8)),lineMat(C.grid,0.7));
+c1Box.position.set((CX(0)+CX(255))/2,4,0);scene.add(c1Box);
+function updateC1(wave=2){
+  let n=0;const Y=NET.c1;
+  for(let o=0;o<256;o++){const local=clamp01((wave-o/256*0.6)/0.4);if(local<=0)continue;const pop=easeBack(local);
+    for(let s=0;s<64;s++){const v=Y[o*64+s];if(v<1.1)continue;const t=Math.min(1,(v-1.1)/1.6);
+      tmpC.copy(C.bg).lerp(C.accent,0.35+0.65*t);setCell(c1Mesh,n++,CX(o),cy(s>>3),cz(s&7),Math.max(0.01,(0.45+0.5*t)*pop),tmpC);}}
+  flush(c1Mesh,n);
+}
+
+/* Tower */
+const BLOCKS=[];
+for(let b=0;b<19;b++){
+  const g=new THREE.Group();const x=TX(b)+0.35;
+  const box=new THREE.Mesh(new THREE.BoxGeometry(0.7,8,8),new THREE.MeshBasicMaterial({transparent:true,opacity:0.07,depthWrite:false}));
+  const edges=new THREE.LineSegments(new THREE.EdgesGeometry(box.geometry),lineMat(C.grid,0.8));
+  const data=new Uint8Array(64*4);const tex=new THREE.DataTexture(data,8,8,THREE.RGBAFormat);tex.magFilter=tex.minFilter=THREE.NearestFilter;
+  const face=new THREE.Mesh(new THREE.PlaneGeometry(7.9,7.9),new THREE.MeshBasicMaterial({map:tex,side:THREE.DoubleSide}));
+  face.geometry.rotateY(-Math.PI/2);face.position.set(-0.36,0,0);
+  g.add(box,edges,face);g.position.set(x,4,0);scene.add(g);
+  const pts=[];for(let i=0;i<=16;i++){const t=i/16;pts.push(new THREE.Vector3(TX(b)-0.15+t*1.0,8.2+Math.sin(t*Math.PI)*0.9,0));}
+  const arc=new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),lineMat(C.muted,0.7));scene.add(arc);
+  BLOCKS.push({g,box,edges,tex,data,arc,pulse:0,shown:-1});
+}
+function heatFill(data,map,ch){
+  let mx=1e-6;for(let s=0;s<64;s++)mx=Math.max(mx,map[ch*64+s]);
+  for(let s=0;s<64;s++){const t=Math.pow(map[ch*64+s]/mx,0.8);tmpC.copy(C.bg).lerp(C.accent,t);
+    data[s*4]=tmpC.r*255;data[s*4+1]=tmpC.g*255;data[s*4+2]=tmpC.b*255;data[s*4+3]=255;}
+}
+function blankFill(data){for(let s=0;s<64;s++){data[s*4]=C.bg.r*255;data[s*4+1]=C.bg.g*255;data[s*4+2]=C.bg.b*255;data[s*4+3]=255;}}
+function styleBlocks(){
+  BLOCKS.forEach((B,b)=>{
+    const sel=S.stage==="tower"&&S.layer===b+1,p=B.pulse;
+    B.box.material.color.copy(sel||p>0?C.accent:C.fg);B.box.material.opacity=sel?0.22:0.06+0.4*p;
+    B.edges.material.color.copy(sel||p>0.05?C.accent:C.grid);B.edges.material.opacity=sel?1:0.8;
+    B.arc.material.color.copy(p>0.05?C.accent:C.muted);B.arc.material.opacity=0.7+0.3*p;
+    B.g.scale.set(1+1.1*p,1+0.07*p,1+0.07*p);B.arc.position.y=0.6*p;});
+  const c1sel=S.stage==="tower"&&S.layer===0;c1Box.material.color.copy(c1sel?C.accent:C.grid);c1Box.material.opacity=c1sel?1:0.7;
+}
+function updateTower(){
+  BLOCKS.forEach((B,b)=>{heatFill(B.data,NET.maps[b+1],S.chan);B.tex.needsUpdate=true;B.shown=S.pos;});
+  styleBlocks();
+  const mini=$("#mini"),x=mini.getContext("2d"),M=NET.maps[S.layer];let mx=1e-6;for(let s=0;s<64;s++)mx=Math.max(mx,M[S.chan*64+s]);
+  for(let s=0;s<64;s++){const r=s>>3,c=s&7,t=Math.pow(M[S.chan*64+s]/mx,0.8);x.fillStyle=hex(tmpC.copy(C.bg).lerp(C.accent,t));x.fillRect(c*20,(7-r)*20,20,20);}
+  x.strokeStyle=hex(C.fg);x.lineWidth=2;x.strokeRect(S.rf.c*20+1,(7-S.rf.r)*20+1,18,18);
+}
+const rfSize=L=>3+4*L;
+
+/* Policy head */
+gridLines(frameGeo([...Array(73)].map((_,k)=>PX(k)).filter((_,k)=>k%8===0||k===72),PY),0.45);
+const polBox=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(PX(72)-PX(0)+0.2,8,8)),lineMat(C.grid,0.7));polBox.position.set((PX(0)+PX(72))/2,PY+4,0);scene.add(polBox);GRIDLINES.push(polBox);
+const polSel=new THREE.LineSegments(frameGeo([0],PY),lineMat(C.accent,1));scene.add(polSel);
+const polMesh=cellMesh(73*64,0.07);
+const polMap=[];
+function updatePolicy(pop=1){
+  const L=G.legal[S.pos].moves;let n=0;polMap.length=0;
+  L.forEach((m,i)=>{const p=sqRC(m.from),k=planeOf(m),local=clamp01((pop-i/Math.max(1,L.length)*0.5)/0.5);if(local<=0)return;
+    const selm=k===S.pol&&p.r===S.from.r&&p.c===S.from.c;
+    setCell(polMesh,n,PX(k),PY+cy(p.r),cz(p.c),Math.max(0.01,easeBack(local)*(selm?1.1:0.8)),selm?C.fg:C.accent);polMap[n]=i;n++;});
+  flush(polMesh,n);polSel.position.x=PX(S.pol);
+}
+
+/* Value head */
+const vMesh=cellMesh(64,0.06);
+gridLines(frameGeo([64],VY),0.9);
+const fcMesh=cellMesh(256,0.3,0.3);
+const gaugeTrack=new THREE.Mesh(new THREE.BoxGeometry(0.25,8,0.25),new THREE.MeshBasicMaterial());gaugeTrack.position.set(71,VY+4,0);scene.add(gaugeTrack);
+const needle=new THREE.Mesh(new THREE.BoxGeometry(0.9,0.18,0.9),new THREE.MeshBasicMaterial());scene.add(needle);
+const zeroTick=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.05,0.5),new THREE.MeshBasicMaterial());zeroTick.position.set(71,VY+4,0);scene.add(zeroTick);
+let needleV=0;
+function updateValue(pop=1){
+  let mx=1e-6,n=0;for(let s=0;s<64;s++)mx=Math.max(mx,NET.vp[s]);const e=easeBack(clamp01(pop*2));
+  for(let s=0;s<64;s++){const t=NET.vp[s]/mx;if(t<0.15)continue;tmpC.copy(C.bg).lerp(C.accent,0.3+0.7*t);setCell(vMesh,n++,64,VY+cy(s>>3),cz(s&7),Math.max(0.01,(0.5+0.4*t)*e),tmpC);}
+  flush(vMesh,n);
+  const fe=clamp01(pop*2-0.5);
+  for(let i=0;i<256;i++){const r=i>>4,c=i&15,lit=0.25+0.5*Math.abs(Math.sin(i*12.9898+S.pos*3.1));tmpC.copy(C.bg).lerp(C.accent,lit*(0.3+0.7*fe));
+    dummy.position.set(67.5,VY+0.4+r*0.48,-3.6+c*0.48);dummy.scale.set(1,1,1);dummy.updateMatrix();fcMesh.setMatrixAt(i,dummy.matrix);fcMesh.setColorAt(i,tmpC);}
+  flush(fcMesh,256);
+  gaugeTrack.material.color.copy(C.grid);zeroTick.material.color.copy(C.muted);needle.material.color.copy(C.accent);
+  needle.position.set(71,VY+4+needleV*4,0);
+}
+
+/* Connectors + signal orbs */
+const CONN=[];
+function poly(pts){const l=new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts.map(p=>new THREE.Vector3(...p))),lineMat(C.muted,0.6));scene.add(l);CONN.push(l);return l;}
+poly([[0.3,4,0],[2.7,4,0]]);poly([[IX(118)+0.3,4,0],[FX-0.3,4,0]]);poly([[FX+0.3,4,0],[CX(0)-0.3,4,0]]);
+poly([[CX(255)+0.3,4,0],[TX(0)-0.3,4,0]]);poly([[TX(18)+0.9,4,0],[62,4,0],[63.7,PY+4,0]]);poly([[62,4,0],[63.7,VY+4,0]]);
+poly([[64.2,VY+4,0],[67.2,VY+4,0]]);poly([[67.8,VY+4,0],[70.7,VY+4,0]]);
+function glowTex(){const cv=document.createElement("canvas");cv.width=cv.height=128;const x=cv.getContext("2d");const g=x.createRadialGradient(64,64,0,64,64,64);
+  g.addColorStop(0,"rgba(255,255,255,1)");g.addColorStop(0.25,"rgba(255,255,255,.85)");g.addColorStop(1,"rgba(255,255,255,0)");x.fillStyle=g;x.fillRect(0,0,128,128);return new THREE.CanvasTexture(cv);}
+const GT=glowTex();
+function orb(){const s=new THREE.Sprite(new THREE.SpriteMaterial({map:GT,transparent:true,depthTest:false}));s.scale.set(2.2,2.2,1);s.renderOrder=30;s.visible=false;scene.add(s);return s;}
+const ORBS=[orb(),orb()];
+
+/* 3D labels */
+label("Board",new THREE.Vector3(0,9.3,0));
+label("Input · 8×8×119",new THREE.Vector3((IX(0)+IX(118))/2,9.3,0));
+label("Filter output",new THREE.Vector3(FX,9.3,0),0.55);
+label("Conv · 8×8×256",new THREE.Vector3((CX(0)+CX(255))/2,9.3,0));
+label("Residual tower · 19 blocks",new THREE.Vector3((TX(0)+TX(18))/2,10.6,0));
+label("Policy · 8×8×73",new THREE.Vector3((PX(0)+PX(72))/2,PY+9.3,0));
+label("Value",new THREE.Vector3(67.5,VY+9.3,0));
+label("+1 win",new THREE.Vector3(72.6,VY+8,0),0.45,true);
+label("0 draw",new THREE.Vector3(72.6,VY+4,0),0.45,true);
+label("−1 loss",new THREE.Vector3(72.6,VY,0),0.45,true);
+label("now",new THREE.Vector3(IX(6),-0.6,0),0.4,true);
+label("7 moves ago",new THREE.Vector3(IX(104),-0.6,0),0.4,true);
+label("game state",new THREE.Vector3(IX(115),-0.6,0),0.4,true);
+const selLabel=label(" ",new THREE.Vector3(0,10.4,0),0.5,true);
+
+/* ================= Camera ================= */
+const VIEWS={
+  play:{p:[28,27,90],t:[36,2,0]},
+  input:{p:[-9,15,28],t:[9,4,0]},
+  filter:{p:[-6,15,32],t:[11,4,0]},
+  tower:{p:[27,20,44],t:[47,4,0]},
+  policy:{p:[50,24,35],t:[67,PY+3,0]},
+  value:{p:[52,6,32],t:[68,VY+4,0]}
+};
+let fly=null;
+function flyTo(v){const P=new THREE.Vector3(...v.p),T=new THREE.Vector3(...v.t);
+  if(reduced){camera.position.copy(P);controls.target.copy(T);return;}
+  fly={p0:camera.position.clone(),t0:controls.target.clone(),P,T,s:performance.now()};}
+
+/* ================= The move animation ================= */
+/* Timeline in seconds. Each stage answers in turn, like a relay. */
+const TL={board:[0,0.6],input:[0.5,1.1],filter:[1.05,1.35],conv:[1.25,1.85],tower:[1.75,2.85],policy:[2.8,3.4],value:[2.8,3.7]};
+const TOTAL=3.8;
+const ORBPATH=[[0.55,[0.5,4,0]],[1.1,[IX(118),4,0]],[1.3,[FX,4,0]],[1.85,[CX(255),4,0]],[2.85,[TX(18)+0.9,4,0]],[2.95,[62,4,0]]];
+let ANIM=null;
+const prog=(t,w)=>clamp01((t-w[0])/(w[1]-w[0]));
+function orbAt(t){
+  if(t<ORBPATH[0][0]||t>3.25)return null;
+  for(let i=0;i<ORBPATH.length-1;i++){const [t0,a]=ORBPATH[i],[t1,b]=ORBPATH[i+1];if(t<=t1){const e=(t-t0)/(t1-t0);return a.map((v,k)=>v+(b[k]-v)*e);}}
+  return null;
+}
+function startMoveAnim(){
+  const vFrom=needleV;S.sel=null;runNet();
+  ANIM={t0:performance.now(),vFrom,vTo:valueOf(S.pos).v};
+  BLOCKS.forEach(B=>{B.pulse=0;blankFill(B.data);B.tex.needsUpdate=true;B.shown=-1;});
+  S.revealed=64;
+  refreshPanels();
+}
+function stepAnim(now){
+  const t=(now-ANIM.t0)/1000;
+  drawBoard(prog(t,TL.board));
+  updateInput(prog(t,TL.input));
+  updateFilter(prog(t,TL.filter));
+  updateC1(prog(t,TL.conv)*1.0);
+  BLOCKS.forEach((B,b)=>{const st=TL.tower[0]+b*0.045,p=clamp01((t-st)/0.32);B.pulse=p>0&&p<1?Math.sin(Math.PI*p):0;
+    if(p>0.3&&B.shown!==S.pos){heatFill(B.data,NET.maps[b+1],S.chan);B.tex.needsUpdate=true;B.shown=S.pos;}});
+  styleBlocks();
+  updatePolicy(prog(t,TL.policy));
+  const vp=prog(t,TL.value);needleV=ANIM.vFrom+(ANIM.vTo-ANIM.vFrom)*easeElastic(vp);updateValue(vp);
+  const o=orbAt(t);
+  if(o){ORBS[0].visible=true;ORBS[0].position.set(...o);ORBS[1].visible=false;}
+  else if(t>2.95&&t<3.35){const e=easeIO((t-2.95)/0.4);ORBS[0].visible=ORBS[1].visible=true;
+    ORBS[0].position.set(62+(64-62)*e,4+(PY+4-4)*e,0);ORBS[1].position.set(62+(71-62)*e,4+(VY+4-4)*e,0);}
+  else ORBS[0].visible=ORBS[1].visible=false;
+  const s=ORBS[0].visible?1.6+0.6*Math.sin(t*18):0;ORBS.forEach(q=>{q.scale.set(2.2+s*0.3,2.2+s*0.3,1);q.material.color.copy(C.accent);});
+  document.querySelectorAll("#signal span").forEach(el=>{const w=TL[el.dataset.k==="conv"?"conv":el.dataset.k];const p=prog(t,w);el.classList.toggle("on",p>0&&p<1);el.classList.toggle("done",p>=1);});
+  if(S.follow){const f=o||(ORBS[0].visible?ORBS[0].position.toArray():null);if(f){const T=new THREE.Vector3(f[0],4,0);controls.target.lerp(T,0.08);camera.position.lerp(T.clone().add(new THREE.Vector3(-9,9,19)),0.06);}}
+  if(t>=TOTAL){ANIM=null;BLOCKS.forEach(B=>B.pulse=0);ORBS.forEach(q=>q.visible=false);
+    document.querySelectorAll("#signal span").forEach(el=>el.classList.remove("on","done"));
+    needleV=valueOf(S.pos).v;refresh();
+    if(S.playing){if(S.pos<G.fens.length-1)autoTimer=setTimeout(()=>{if(S.playing)goTo(S.pos+1,true);},650);else{S.playing=false;refreshPanels();}}}
+}
+let autoTimer=null;
+
+/* ================= Navigation ================= */
+function defaultPolicySel(){
+  const L=G.legal[S.pos].moves;if(!L.length)return;
+  const nx=G.moves[S.pos+1];const m=nx?L.find(x=>x.from===nx.from&&x.to===nx.to)||L[0]:L[0];
+  S.from=sqRC(m.from);S.pol=planeOf(m);$("#polSlider").value=S.pol;
+}
+function goTo(i,animate){
+  i=Math.max(0,Math.min(G.fens.length-1,i));
+  const forward=i===S.pos+1&&G.moves[i];
+  S.pos=i;S.sel=null;defaultPolicySel();$("#posSlider").max=G.fens.length-1;$("#posSlider").value=i;
+  if(animate&&forward&&!reduced)startMoveAnim();
+  else{ANIM=null;runNet();needleV=valueOf(S.pos).v;S.revealed=64;newStatic();}
+}
+function newStatic(){updateInput(1);updateC1(2);refresh();}
+
+/* ================= Panels ================= */
+function setStage(name){
+  S.stage=name;
+  document.querySelectorAll(".tabs button").forEach(b=>b.setAttribute("aria-selected",b.dataset.stage===name));
+  document.querySelectorAll("[data-sec]").forEach(s=>s.hidden=s.dataset.sec!==name);
+  if(name!=="filter")stopSweep();
+  $("#hint").textContent=name==="play"?"Drag to orbit · scroll or pinch to zoom · tap a piece to move it":"Drag to orbit · scroll or pinch to zoom · tap the board";
+  flyTo(VIEWS[name]);refresh();
+}
+function refreshVisibility(){
+  selFrame.visible=S.stage==="input";selLabel.sp.visible=S.stage==="input";
+  winBox.visible=outCursor.visible=S.stage==="filter";if(filtFrames)filtFrames.visible=S.stage==="filter";
+  polSel.visible=S.stage==="policy";
+}
+function refreshPlay(){
+  const L=G.legal[S.pos],P=G.pos[S.pos],side=P.side==="w"?"White":"Black";
+  let s=moveLabel(S.pos),sub;
+  if(L.mate)sub="Checkmate. "+(side==="White"?"Black":"White")+" wins.";else if(L.draw)sub="Draw.";else sub=side+" to move"+(L.check?", in check":"")+" · "+L.moves.length+" legal moves";
+  $("#status").innerHTML=s+"<small>"+sub+"</small>";
+  $("#playBtn").textContent=S.playing?"❚❚ Pause":"▶ Play";
+  $("#backBtn").disabled=S.pos===0;$("#nextBtn").disabled=S.pos>=G.fens.length-1;
+  $("#playBtn").disabled=S.pos>=G.fens.length-1&&!S.playing;
+}
+function refreshInputPanel(){
+  const i=S.plane;$("#planeNum").textContent=i+" of 118";
+  selFrame.position.x=IX(i);selLabel.sp.position.x=IX(i);selLabel.text=planeName(i);drawLabel(selLabel);
+  let ones=0;for(let s=0;s<64;s++)if(NET.X[i*64+s])ones++;
+  let h="<span class='k'>Sheet</span> "+planeName(i)+"<br>";
+  if(i<112){const t=Math.floor(i/14),q=S.pos-t;
+    h+=q<0?"<span class='k'>Moment</span> before the game started, so every square is 0":"<span class='k'>Moment</span> "+(q===0?"the starting position":"after "+moveLabel(q))+"<br><span class='k'>Squares set to 1</span> "+ones+" of 64";}
+  else h+="<span class='k'>Value on all 64 squares</span> <span class='hit'>"+NET.X[i*64]+"</span>";
+  $("#planeReadout").innerHTML=h;
+}
+function kernelHTML(){
+  const A=S.variant==="A";
+  const pawnG=A?[0,0,0,0,0,0,.5,0,.5]:[.5,0,.5,0,0,0,0,0,0];const pg=[0,0,0,0,1,0,0,0,0];
+  const grid=w=>'<div class="g">'+w.map(v=>"<span class='"+(v?"on":"")+"'>"+(v||"0")+"</span>").join("")+"</div>";
+  return '<div class="kern">'+(A?"White-pawn sheet":"Black-pawn sheet")+grid(pawnG)+'</div><div class="kern">Each '+(A?"Black":"White")+"-piece sheet (×6)"+grid(pg)+'</div><div class="kern">Bias<div class="g" style="grid-template-columns:28px"><span class="on">−1</span></div></div><div class="kern">Other 112 sheets: 0</div>';
+}
+function refreshFilterPanel(){
+  $("#varA").setAttribute("aria-pressed",S.variant==="A");$("#varB").setAttribute("aria-pressed",S.variant==="B");
+  $("#kernels").innerHTML=kernelHTML();
+  const {r,c}=S.cur,f=filterAt(r,c),A=S.variant==="A";
+  let h="<span class='k'>Square</span> "+sqName(r,c)+"<br>";
+  f.terms.forEach(t=>{h+="<span class='k'>"+(A?"White":"Black")+" pawn on "+(t.sq||"(off board)")+"</span> "+(t.hit?"<span class='hit'>yes +0.5</span>":"no 0")+"<br>";});
+  h+="<span class='k'>"+(A?"Black":"White")+" piece on "+sqName(r,c)+"</span> "+(f.tgt?"<span class='hit'>"+pieceName(f.ch)+" +1</span>":"no 0")+"<br>";
+  h+="<span class='k'>Sum + bias</span> "+(f.sum+1).toFixed(1)+" − 1 = "+f.sum.toFixed(1)+"<br><span class='k'>Output</span> "+(f.out>0?"<span class='hit'>"+f.out.toFixed(1)+" fires</span>":"0");
+  const hits=[];for(let s=0;s<64;s++){if(filterAt(s>>3,s&7).out>0)hits.push(sqName(s>>3,s&7));}
+  h+="<br><span class='k'>Fires on</span> "+(hits.length?"<span class='hit'>"+hits.join(", ")+"</span>":"no squares in this position");
+  $("#filterReadout").innerHTML=h;
+  $("#sweepBtn").textContent=S.sweeping?"Pause":"Sweep the board";
+}
+function refreshTowerPanel(){
+  const L=S.layer;$("#layerLabel").textContent=L===0?"first convolution":"residual block "+L+" of 19";
+  $("#chanLabel").textContent=(S.chan+1)+" of 32 shown";
+  const sz=rfSize(L);
+  $("#towerReadout").innerHTML="<span class='k'>3×3 convolutions so far</span> "+(1+2*L)+"<br><span class='k'>Patch one square sees</span> "+sz+"×"+sz+"<br>"+(sz>=15?"<span class='hit'>Every square can now see the whole board</span>":"<span class='k'>Whole board from any square at</span> 15×15");
+}
+function refreshPolicyPanel(){
+  const Lg=G.legal[S.pos].moves,nx=G.moves[S.pos+1];
+  $("#legalCount").innerHTML="<span class='hit'>"+Lg.length+"</span> legal of 4,672 slots · <span class='k'>masked</span> "+(4672-Lg.length).toLocaleString();
+  const ml=$("#moveList");ml.innerHTML="";
+  Lg.forEach(m=>{const b=document.createElement("button");b.type="button";b.textContent=m.san;const p=sqRC(m.from),k=planeOf(m);
+    b.setAttribute("aria-pressed",k===S.pol&&p.r===S.from.r&&p.c===S.from.c);
+    if(nx&&nx.from===m.from&&nx.to===m.to){b.classList.add("next");b.title="Played next in this game";}
+    b.addEventListener("click",()=>{S.from=p;S.pol=k;$("#polSlider").value=k;refresh();});ml.appendChild(b);});
+  $("#polNum").textContent=S.pol+" of 72";
+  const I=polInfo(S.pol,G.pos[S.pos].side==="w"),{r,c}=S.from,r1=r+I.dr,c1=c+I.dc,on=r1>=0&&r1<8&&c1>=0&&c1<8,P=G.pos[S.pos].b[r][c];
+  const legal=Lg.find(m=>m.from===sqName(r,c)&&planeOf(m)===S.pol);
+  let h="<span class='k'>Sheet</span> "+I.name+"<br><span class='k'>From</span> "+sqName(r,c)+(P?" ("+(P===P.toUpperCase()?"White ":"Black ")+pieceName(P)+")":" (empty)")+"<br>";
+  h+="<span class='k'>Lands on</span> "+(on?sqName(r1,c1):"off the board")+"<br><span class='k'>Slot</span> "+((r*8+c)*73+S.pol).toLocaleString()+" of 0–4,671<br>";
+  h+="<span class='k'>Status</span> "+(legal?"<span class='hit'>legal: "+legal.san+"</span>":"masked out");
+  $("#policyReadout").innerHTML=h;
+}
+function refreshValuePanel(){
+  const V=valueOf(S.pos),side=G.pos[S.pos].side==="w"?"White":"Black";
+  $("#meterNeedle").style.left=((V.v+1)/2*100)+"%";
+  let h="<span class='k'>Side to move</span> "+side+"<br>";
+  if(V.why==="checkmate")h+="<span class='k'>Checkmate</span> <span class='hit'>v = −1</span>";
+  else if(V.why==="draw")h+="<span class='k'>Draw</span> <span class='hit'>v = 0</span>";
+  else h+="<span class='k'>Material</span> White "+V.w+", Black "+V.b+"<br><span class='k'>v = tanh("+(V.d>0?"+":"")+V.d+" ÷ 5)</span> <span class='hit'>"+(V.v>=0?"+":"")+V.v.toFixed(2)+"</span>";
+  h+="<br><span class='k'>Expected score</span> "+((V.v+1)/2*100).toFixed(0)+"%";
+  $("#valueReadout").innerHTML=h;
+}
+function refreshPanels(){
+  $("#posLabel").textContent=moveLabel(S.pos);
+  refreshPlay();refreshInputPanel();refreshFilterPanel();refreshTowerPanel();refreshPolicyPanel();refreshValuePanel();
+}
+function refresh(){
+  refreshVisibility();refreshPanels();
+  if(!ANIM){updateFilter();updateTower();updatePolicy();updateValue();drawBoard();}
+}
+
+/* ================= Controls ================= */
+document.querySelectorAll(".tabs button").forEach(b=>b.addEventListener("click",()=>setStage(b.dataset.stage)));
+$("#posSlider").addEventListener("input",e=>{stopAuto();goTo(+e.target.value,false);});
+$("#planeSlider").addEventListener("input",e=>{S.plane=+e.target.value;refresh();});
+$("#layerSlider").addEventListener("input",e=>{S.layer=+e.target.value;refresh();});
+$("#chanSlider").addEventListener("input",e=>{S.chan=+e.target.value;refresh();});
+$("#polSlider").addEventListener("input",e=>{S.pol=+e.target.value;refresh();});
+$("#varA").addEventListener("click",()=>{S.variant="A";refresh();});
+$("#varB").addEventListener("click",()=>{S.variant="B";refresh();});
+$("#follow").addEventListener("change",e=>{S.follow=e.target.checked;if(!S.follow)flyTo(VIEWS[S.stage]);});
+function stopAuto(){S.playing=false;clearTimeout(autoTimer);}
+$("#playBtn").addEventListener("click",()=>{
+  if(S.playing){stopAuto();refreshPanels();return;}
+  if(S.pos>=G.fens.length-1)return;S.playing=true;if(!ANIM)goTo(S.pos+1,true);refreshPanels();});
+$("#nextBtn").addEventListener("click",()=>{stopAuto();goTo(S.pos+1,true);});
+$("#backBtn").addEventListener("click",()=>{stopAuto();goTo(S.pos-1,false);});
+$("#operaBtn").addEventListener("click",()=>{stopAuto();loadLine(OPERA);goTo(0,false);});
+$("#newBtn").addEventListener("click",()=>{stopAuto();loadLine([]);goTo(0,false);});
+let sweepTimer=null;
+function stopSweep(){S.sweeping=false;clearInterval(sweepTimer);sweepTimer=null;}
+function sweepStep(){if(S.revealed>=64)S.revealed=0;S.cur=SWEEP[S.revealed];S.revealed++;if(S.revealed>=64)stopSweep();refresh();}
+$("#stepBtn").addEventListener("click",()=>{stopSweep();sweepStep();});
+$("#sweepBtn").addEventListener("click",()=>{if(S.sweeping){stopSweep();refresh();return;}S.sweeping=true;if(S.revealed>=64)S.revealed=0;sweepTimer=setInterval(sweepStep,reduced?400:170);refresh();});
+
+/* Picking */
+const ray=new THREE.Raycaster(),ndc=new THREE.Vector2();let down=null;
+canvas.addEventListener("pointerdown",e=>{down={x:e.clientX,y:e.clientY};});
+canvas.addEventListener("pointerup",e=>{
+  if(!down||Math.hypot(e.clientX-down.x,e.clientY-down.y)>6)return;down=null;
+  const rc=canvas.getBoundingClientRect();ndc.set((e.clientX-rc.left)/rc.width*2-1,-(e.clientY-rc.top)/rc.height*2+1);
+  ray.setFromCamera(ndc,camera);
+  const hits=ray.intersectObjects([boardMesh,inputMesh,polMesh]);if(!hits.length)return;const h=hits[0];
+  if(h.object===boardMesh){const c=Math.min(7,Math.floor(h.uv.x*8)),r=Math.min(7,Math.floor(h.uv.y*8));
+    if(S.stage==="play"){if(ANIM)return;onBoardPlay(r,c);return;}
+    if(S.stage==="filter"){stopSweep();S.cur={r,c};S.revealed=64;}
+    else if(S.stage==="tower")S.rf={r,c};
+    else if(S.stage==="policy")S.from={r,c};
+    else if(S.stage==="input"||S.stage==="value"){const ch=G.pos[S.pos].b[r][c];if(ch){S.plane=PIECES.indexOf(ch);$("#planeSlider").value=S.plane;if(S.stage!=="input"){setStage("input");return;}}}
+    refresh();}
+  else if(h.object===inputMesh&&h.instanceId!=null){S.plane=inputMap[h.instanceId];$("#planeSlider").value=S.plane;if(S.stage!=="input")setStage("input");else refresh();}
+  else if(h.object===polMesh&&h.instanceId!=null){const m=G.legal[S.pos].moves[polMap[h.instanceId]];if(m){S.from=sqRC(m.from);S.pol=planeOf(m);$("#polSlider").value=S.pol;if(S.stage!=="policy")setStage("policy");else refresh();}}
+});
+$("#pboard").addEventListener("click",e=>{if(ANIM)return;const b=e.currentTarget.getBoundingClientRect();const c=Math.min(7,Math.floor((e.clientX-b.left)/b.width*8)),r=7-Math.min(7,Math.floor((e.clientY-b.top)/b.height*8));onBoardPlay(r,c);});
+function onBoardPlay(r,c){
+  const L=G.legal[S.pos].moves,sq=sqName(r,c);
+  if(S.sel){const from=sqName(S.sel.r,S.sel.c),m=L.find(x=>x.from===from&&x.to===sq);
+    if(m){stopAuto();if(pushMove({from,to:sq,promotion:"q"}))goTo(S.pos+1,true);return;}}
+  S.sel=L.some(x=>x.from===sq)?{r,c}:null;drawBoard();
+}
+
+/* ================= Theme ================= */
+function applyTheme(){
+  readColors();scene.background=C.bg.clone();boardBack.material.color.copy(C.grid);
+  GRIDLINES.forEach(l=>l.material.color.copy(C.grid));CONN.forEach(l=>l.material.color.copy(C.muted));
+  [selFrame,winBox,outCursor,polSel].forEach(l=>l.material.color.copy(C.accent));
+  LABELS.forEach(drawLabel);
+  if(NET){updateInput(1);updateC1(2);refresh();}
+}
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",applyTheme);
+new MutationObserver(applyTheme).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+if(document.fonts&&document.fonts.ready)document.fonts.ready.then(()=>{LABELS.forEach(drawLabel);if(!ANIM)drawBoard();});
+
+/* ================= Loop ================= */
+function resize(){const w=stageEl.clientWidth,h=stageEl.clientHeight;if(!w||!h)return;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+window.__azResize=resize;
+new ResizeObserver(resize).observe(stageEl);
+function loop(now){
+  if(fly){const t=Math.min(1,(now-fly.s)/1100),e=easeIO(t);camera.position.lerpVectors(fly.p0,fly.P,e);controls.target.lerpVectors(fly.t0,fly.T,e);if(t>=1)fly=null;}
+  if(ANIM)stepAnim(now);
+  controls.update();renderer.render(scene,camera);requestAnimationFrame(loop);
+}
+
+loadLine(OPERA);applyTheme();runNet();needleV=valueOf(0).v;defaultPolicySel();newStatic();resize();
+$("#posSlider").max=G.fens.length-1;
+camera.position.set(...VIEWS.play.p);controls.target.set(...VIEWS.play.t);
+requestAnimationFrame(loop);
+
+}
+})();
+
+</script>
