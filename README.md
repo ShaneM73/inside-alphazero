@@ -6,7 +6,7 @@ Play a move and watch it travel through the whole network: the input sheets shif
 
 ![The explorer mid-move: the signal passing through the residual tower](docs/screenshots/explorer-play.png)
 
-**Live demo:** `https://<your-username>.github.io/<repo-name>/` (after enabling GitHub Pages, see below)
+**Live demo:** https://shanem73.github.io/inside-alphazero/
 
 ---
 
@@ -47,8 +47,8 @@ Eleven illustrated sections covering the whole system: input encoding, convoluti
 It's a single static page with no build step required to view it.
 
 ```bash
-git clone https://github.com/<your-username>/<repo-name>.git
-cd <repo-name>
+git clone https://github.com/ShaneM73/inside-alphazero.git
+cd inside-alphazero
 python3 -m http.server 8000
 # open http://localhost:8000
 ```
@@ -73,12 +73,16 @@ python3 src/build.py
 
 ---
 
-## Publish on GitHub Pages
+## Publishing
 
-1. Push this folder to a new GitHub repository.
-2. In the repository, open **Settings → Pages**.
-3. Under **Build and deployment**, choose **Deploy from a branch**, pick `main` and `/ (root)`, and save.
-4. After a minute, the site is live at `https://<your-username>.github.io/<repo-name>/`.
+The live site is served by GitHub Pages from the `gh-pages` branch. After changing the page, rebuild it, commit to `main`, and update `gh-pages`:
+
+```bash
+python3 src/build.py
+git commit -am "Update page"
+git push origin main
+git push origin main:gh-pages
+```
 
 ---
 
